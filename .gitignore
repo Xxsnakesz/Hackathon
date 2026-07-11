@@ -1,6 +1,28 @@
-PS_20174392719_1491204439457_log.csv
-*.csv
-.DS_Store
-__pycache__/
-*.pyc
+# Large original Kaggle datasets (400MB+ files should not be pushed to Git)
+PS_*.csv
+*.large.csv
+
+# Environment files
 .env
+*.env
+
+# Python cache and virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+# IDE / Editor folders
+.idea/
+.vscode/
+*.swp
+*.swo
