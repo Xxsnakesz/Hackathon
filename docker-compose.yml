@@ -1,0 +1,265 @@
+version: "3.9"
+
+services:
+  # =============================================================
+  # PostgreSQL - PaySim Financial Transaction Database
+  # =============================================================
+  postgres:
+    image: postgres:15
+    container_name: paysim-postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-paysim_fintech}
+      POSTGRES_USER: ${POSTGRES_USER:-paysim_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-paysim_secret_2026}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-paysim_user} -d ${POSTGRES_DB:-paysim_fintech}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - datahub-network
+
+  # =============================================================
+  # DataHub Infrastructure Services
+  # =============================================================
+
+  # --- Zookeeper ---
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    container_name: datahub-zookeeper
+    restart: unless-stopped
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo ruok | nc localhost 2181 | grep imok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - datahub-network
+
+  # --- Kafka Broker ---
+  broker:
+    image: confluentinc/cp-kafka:7.4.0
+    container_name: datahub-broker
+    restart: unless-stopped
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_CONFLUENT_TOPIC_REPLICATION_FACTOR: 1
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "broker:29092", "--list"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+    networks:
+      - datahub-network
+
+  # --- Schema Registry ---
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.4.0
+    container_name: datahub-schema-registry
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: broker:29092
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+    depends_on:
+      broker:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/subjects"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks:
+      - datahub-network
+
+  # --- Elasticsearch ---
+  elasticsearch:
+    image: elasticsearch:7.17.9
+    container_name: datahub-elasticsearch
+    restart: unless-stopped
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms256m -Xmx512m"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9200/_cluster/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    networks:
+      - datahub-network
+
+  # --- MySQL (DataHub Metadata Storage) ---
+  mysql:
+    image: mysql:8.0
+    container_name: datahub-mysql
+    restart: unless-stopped
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_DATABASE: datahub
+      MYSQL_USER: datahub
+      MYSQL_PASSWORD: datahub
+      MYSQL_ROOT_PASSWORD: datahub
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_bin --default-authentication-plugin=mysql_native_password
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "datahub", "-pdatahub"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - mysql-data:/var/lib/mysql
+    networks:
+      - datahub-network
+
+  # =============================================================
+  # DataHub Core Services
+  # =============================================================
+
+  # --- DataHub GMS (Generalized Metadata Service) ---
+  datahub-gms:
+    image: linkedin/datahub-gms:v0.14.0
+    container_name: datahub-gms
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      DATAHUB_SERVER_TYPE: quickstart
+      DATAHUB_TELEMETRY_ENABLED: "false"
+
+      # MySQL connection
+      EBEAN_DATASOURCE_URL: jdbc:mysql://mysql:3306/datahub?verifyServerCertificate=false&useSSL=false&useUnicode=yes&characterEncoding=UTF-8
+      EBEAN_DATASOURCE_USERNAME: datahub
+      EBEAN_DATASOURCE_PASSWORD: datahub
+      EBEAN_DATASOURCE_DRIVER: com.mysql.jdbc.Driver
+
+      # Kafka
+      KAFKA_BOOTSTRAP_SERVER: broker:29092
+      KAFKA_SCHEMAREGISTRY_URL: http://schema-registry:8081
+
+      # Elasticsearch
+      ELASTICSEARCH_HOST: elasticsearch
+      ELASTICSEARCH_PORT: "9200"
+      GRAPH_SERVICE_IMPL: elasticsearch
+
+      # Neo4j disabled (use ES for graph)
+      NEO4J_HOST: ""
+
+      JAVA_OPTS: "-Xms256m -Xmx512m"
+      ENTITY_REGISTRY_CONFIG_PATH: /datahub/datahub-gms/resources/entity-registry.yml
+      MAE_CONSUMER_ENABLED: "true"
+      MCE_CONSUMER_ENABLED: "true"
+      PE_CONSUMER_ENABLED: "true"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      broker:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    networks:
+      - datahub-network
+
+  # --- DataHub Frontend ---
+  datahub-frontend-react:
+    image: linkedin/datahub-frontend-react:v0.14.0
+    container_name: datahub-frontend
+    restart: unless-stopped
+    ports:
+      - "9002:9002"
+    environment:
+      DATAHUB_GMS_HOST: datahub-gms
+      DATAHUB_GMS_PORT: "8080"
+      DATAHUB_SECRET: YouKnowNothing
+      DATAHUB_APP_VERSION: "1.0"
+      DATAHUB_PLAY_MEM_BUFFER_SIZE: 10MB
+      DATAHUB_TELEMETRY_ENABLED: "false"
+      JAVA_OPTS: "-Xms128m -Xmx256m"
+    depends_on:
+      datahub-gms:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9002/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    networks:
+      - datahub-network
+
+  # --- DataHub Actions ---
+  datahub-actions:
+    image: linkedin/datahub-actions:v0.0.15
+    container_name: datahub-actions
+    restart: unless-stopped
+    environment:
+      DATAHUB_GMS_URL: http://datahub-gms:8080
+      DATAHUB_GMS_HOST: datahub-gms
+      DATAHUB_GMS_PORT: "8080"
+      KAFKA_BOOTSTRAP_SERVER: broker:29092
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      METADATA_AUDIT_EVENT_NAME: MetadataAuditEvent_v4
+      METADATA_CHANGE_LOG_VERSIONED_TOPIC_NAME: MetadataChangeLog_Versioned_v1
+    depends_on:
+      datahub-gms:
+        condition: service_healthy
+    networks:
+      - datahub-network
+
+# =============================================================
+# Volumes
+# =============================================================
+volumes:
+  postgres-data:
+    driver: local
+  mysql-data:
+    driver: local
+  elasticsearch-data:
+    driver: local
+
+# =============================================================
+# Networks
+# =============================================================
+networks:
+  datahub-network:
+    driver: bridge
+    name: datahub-network

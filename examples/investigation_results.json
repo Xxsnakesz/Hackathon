@@ -1,0 +1,75 @@
+{
+  "status": "incident_detected",
+  "model_name": "Fraud_Detection_ML_Model",
+  "model_urn": "urn:li:mlModel:(urn:li:dataPlatform:mlflow,Fraud_Detection_ML_Model,PROD)",
+  "drift_info": {
+    "dataset_name": "paysim_raw_transactions",
+    "dataset_urn": "urn:li:dataset:(urn:li:dataPlatform:postgres,paysim_fintech.public.paysim_raw_transactions,PROD)",
+    "column": "amount",
+    "previous_type": "DOUBLE",
+    "current_type": "STRING",
+    "change_timestamp": "2026-07-10T09:15:00Z",
+    "change_description": "Column 'amount' type changed from DOUBLE to STRING"
+  },
+  "root_cause": "The column 'amount' in upstream table 'paysim_raw_transactions' was changed from type 'DOUBLE' to 'STRING' on 2026-07-10T09:15:00Z.\n\nThis column is a CRITICAL numeric feature used by Fraud_Detection_ML_Model. When the type changed to STRING, the ML model could no longer perform mathematical operations on this feature, causing:\n  \u2022 Accuracy drop: 97.8% \u2192 42.3%\n  \u2022 False Positive Rate spike: 2.1% \u2192 78.5%\n  \u2022 Legitimate transactions blocked at 37x normal rate\n\nThe schema change was likely made by an upstream engineer without awareness of downstream ML dependencies.",
+  "tag_applied": "DATA-INCIDENT: DO NOT USE",
+  "tag_success": true,
+  "fix_scripts": {
+    "sql_fix_path": "/Users/bambangaji/Documents/Hackathon/examples/generated_fix_amount.sql",
+    "dbt_fix_path": "/Users/bambangaji/Documents/Hackathon/examples/generated_dbt_fix_amount.sql",
+    "sql_preview": "-- =============================================================================\n-- AUTO-GENERATED FIX SCRIPT by AI Data Reliability Agent\n-- Generated at: 2026-07-11 15:07:29\n-- =============================================================================\n--\n-- PROBLEM DETECTED:\n--   Table: public.paysim_raw_transactions\n--   Column: amount\n--   Current (Wrong) Type: STRING\n--   Expected (Correct) Type: DOUBLE -> DOUBLE PRECISION\n--\n-- ROOT CAUSE:\n--   An upstream engineer changed the column ty..."
+  },
+  "report": "## \ud83d\udd0d Root Cause Investigation Report\n\n### Alert Summary\n\ud83d\udea8 **PRODUCTION ALERT \u2014 ML Model Accuracy Degradation**\n\n**Model:** Fraud_Detection_ML_Model\n**Metric:** Fraud Detection Accuracy\n**Current:** 42.3% (was 97.8%)\n**False Positive Rate:** 78.5% (was 2.1%\n\n### Affected ML Model\n- **Name:** Fraud_Detection_ML_Model\n- **URN:** urn:li:mlModel:(urn:li:dataPlatform:mlflow,Fraud_Detection_ML_Model,PROD)\n- **Platform:** mlflow\n\n### Lineage Trace (Upstream Dependencies)\n  \u251c\u2500 feature_engineering_table (postgres)\n  \u2514\u2500 paysim_raw_transactions (postgres)\n\n\n### Schema Drift Detected \u26a0\ufe0f\n**Dataset:** paysim_raw_transactions\n**Column:** `amount`\n**Previous Type:** `DOUBLE`\n**Current Type:** `STRING`\n**Change Detected At:** 2026-07-10T09:15:00Z\n\n### Root Cause Analysis\nThe column 'amount' in upstream table 'paysim_raw_transactions' was changed from type 'DOUBLE' to 'STRING' on 2026-07-10T09:15:00Z.\n\nThis column is a CRITICAL numeric feature used by Fraud_Detection_ML_Model. When the type changed to STRING, the ML model could no longer perform mathematical operations on this feature, causing:\n  \u2022 Accuracy drop: 97.8% \u2192 42.3%\n  \u2022 False Positive Rate spike: 2.1% \u2192 78.5%\n  \u2022 Legitimate transactions blocked at 37x normal rate\n\nThe schema change was likely made by an upstream engineer without awareness of downstream ML dependencies.\n\n### Remediation Actions Executed\n1. \u2705 Added tag `[DATA-INCIDENT: DO NOT USE]` to `Fraud_Detection_ML_Model` in DataHub\n2. \u2705 Generated SQL fix script: `/Users/bambangaji/Documents/Hackathon/examples/generated_fix_amount.sql`\n3. \u2705 Incident report written back to DataHub metadata\n\n### Recommended Next Steps\n1. Review and apply the generated SQL fix script\n2. Re-run DataHub ingestion to update metadata\n3. Retrain/revalidate the Fraud Detection model\n4. Remove the DATA-INCIDENT tag once verified\n5. Add schema change alerts to prevent recurrence\n",
+  "investigation_log": [
+    {
+      "timestamp": "2026-07-11T15:07:29.481707",
+      "step": "STEP 1: Identify Affected Model",
+      "detail": "Parsing alert to find the ML model mentioned..."
+    },
+    {
+      "timestamp": "2026-07-11T15:07:29.481859",
+      "step": "STEP 1: Complete",
+      "detail": "Found model: Fraud_Detection_ML_Model (URN: urn:li:mlModel:(urn:li:dataPlatform:mlflow,Fraud_Detection_ML_Model,PROD))"
+    },
+    {
+      "timestamp": "2026-07-11T15:07:29.481872",
+      "step": "STEP 2: Trace Upstream Lineage",
+      "detail": "Traversing lineage graph upstream from Fraud_Detection_ML_Model..."
+    },
+    {
+      "timestamp": "2026-07-11T15:07:29.481934",
+      "step": "STEP 2: Complete",
+      "detail": "Found 2 upstream entities:\n  \u251c\u2500 feature_engineering_table (postgres)\n  \u2514\u2500 paysim_raw_transactions (postgres)\n"
+    },
+    {
+      "timestamp": "2026-07-11T15:07:29.481943",
+      "step": "STEP 3: Check Schema History",
+      "detail": "Examining schema history for each upstream dataset..."
+    },
+    {
+      "timestamp": "2026-07-11T15:07:29.482007",
+      "step": "\u26a0\ufe0f  SCHEMA DRIFT DETECTED",
+      "detail": "Column 'amount' in 'paysim_raw_transactions' changed from DOUBLE to STRING at 2026-07-10T09:15:00Z"
+    },
+    {
+      "timestamp": "2026-07-11T15:07:29.482018",
+      "step": "STEP 4: Root Cause Analysis",
+      "detail": "Correlating schema drift with model degradation..."
+    },
+    {
+      "timestamp": "2026-07-11T15:07:29.482028",
+      "step": "STEP 4: Complete",
+      "detail": "Root cause identified:\nThe column 'amount' in upstream table 'paysim_raw_transactions' was changed from type 'DOUBLE' to 'STRING' on 2026-07-10T09:15:00Z.\n\nThis column is a CRITICAL numeric feature used by Fraud_Detection_ML_Model. When the type changed to STRING, the ML model could no longer perform mathematical operations on this feature, causing:\n  \u2022 Accuracy drop: 97.8% \u2192 42.3%\n  \u2022 False Positive Rate spike: 2.1% \u2192 78.5%\n  \u2022 Legitimate transactions blocked at 37x normal rate\n\nThe schema change was likely made by an upstream engineer without awareness of downstream ML dependencies."
+    },
+    {
+      "timestamp": "2026-07-11T15:07:29.482040",
+      "step": "STEP 5: Execute Remediation",
+      "detail": "Writing incident tag to DataHub and generating fix scripts..."
+    },
+    {
+      "timestamp": "2026-07-11T15:07:29.482420",
+      "step": "STEP 5: Complete",
+      "detail": "Tag 'DATA-INCIDENT: DO NOT USE' added to Fraud_Detection_ML_Model. Fix scripts generated at /Users/bambangaji/Documents/Hackathon/examples/"
+    }
+  ]
+}
