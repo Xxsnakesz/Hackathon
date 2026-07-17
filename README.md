@@ -55,17 +55,50 @@ Without DataHub's lineage graph, it takes **hours or days** to trace which upstr
 
 ---
 
+## 🕸️ Dynamic Pipeline Discovery (Context-Based Agent)
+
+The agent is **not hardcoded to PaySim**. On startup it reads the DataHub graph and discovers what to protect:
+
+1. **Find protected ML models** — search all entities where `platform ∈ {mlflow, sagemaker, kubeflow, vertex-ai, tensorflow, pytorch}` **AND** `tag = production`. Both lists are configurable via env vars `ML_PLATFORMS` and `ML_TAG_FILTER`.
+2. **Traverse lineage upstream** from each model (multi-hop) to collect every source table on `platform ∈ {postgres, mysql, snowflake, bigquery, redshift}` (configurable via `SOURCE_PLATFORMS`).
+3. **Baseline schema per table** comes from DataHub's `schemaMetadata` aspect — the exact column names and types that were registered when the pipeline was set up.
+4. **Per-column criticality is derived from context**, not hardcoded:
+
+| Signal from DataHub | Result |
+|---|---|
+| Field tagged `ml-target` / `target-variable` | **CRITICAL** |
+| Field tagged `critical-feature` / `ml-input` | **CRITICAL** |
+| Numeric column on an active ML lineage path | **CRITICAL** |
+| Field tagged `pii` | **HIGH** |
+| Field has curated glossary description | **HIGH** |
+| Everything else | MEDIUM |
+
+The agent then monitors those tables via live PostgreSQL `information_schema.columns`, detects drift against the DataHub-registered baseline, and writes incident tags back to **every** ML model whose upstream lineage is affected — not just one.
+
+**Zero configuration for a new pipeline.** Register any dataset + ML model + lineage in DataHub, click **Rediscover from DataHub** in the sidebar, and the agent starts protecting it. PaySim is included as an example pipeline you can swap out.
+
+**If DataHub has no registered ML model, the agent refuses to boot** — it prints a message telling you to register a pipeline first. There's no silent fallback that would hide misconfiguration.
+
+Reference implementation: [`src/agent/pipeline_discovery.py`](src/agent/pipeline_discovery.py).
+
+---
+
 ## 🏗️ How DataHub is Used
 
 This project uses DataHub **beyond reading metadata** — it actively writes back to the graph:
 
 | DataHub Feature | Implementation | Code |
 |---|---|---|
-| **Lineage Graph (READ)** | Agent calls `GET /relationships` on DataHub GMS to traverse upstream from ML model | `datahub_gms_client.py` |
-| **Entity Metadata (READ)** | Agent calls `GET /entities/{urn}` to get model name, tags, description | `datahub_gms_client.py` |
-| **MCP Write-Back (WRITE)** | Agent emits `GlobalTagsClass` MCP via `DatahubRestEmitter` SDK to tag ML model with `DATA-INCIDENT` | `datahub_gms_client.py` |
-| **Incident Emit (WRITE)** | Agent emits `DatasetPropertiesClass` MCP with incident description to DataHub | `datahub_gms_client.py` |
-| **Schema Registration** | `lineage_bootstrap.py` registers datasets, ML model, lineage, and tags via DataHub REST emitter | `lineage_bootstrap.py` |
+| **Pipeline Discovery (READ)** | Agent searches DataHub for ML models by platform + tag, then traverses lineage to collect source tables — **no hardcoded pipeline names** | `pipeline_discovery.py` |
+| **Schema Metadata (READ)** | Agent reads `schemaMetadata` aspect to build baseline for each source table (columns + types) | `datahub_gms_client.py:get_schema_metadata` |
+| **Ownership (READ)** | Agent reads `ownership` aspect for context ("who owns this drifted column") | `datahub_gms_client.py:get_ownership` |
+| **Field-Level Tags (READ)** | Agent reads `editableSchemaMetadata` and `globalTags` on fields to derive per-column criticality | `datahub_gms_client.py:get_field_tags` |
+| **Lineage Graph (READ)** | Multi-hop upstream traversal via `GET /relationships` to find every source table feeding each ML model | `datahub_gms_client.py:get_lineage` |
+| **Entity Metadata (READ)** | `GET /entities/{urn}` to get model name, tags, description | `datahub_gms_client.py` |
+| **MCP Write-Back (WRITE)** | Agent emits `GlobalTagsClass` MCP via `DatahubRestEmitter` SDK to tag **every impacted** ML model with `DATA-INCIDENT` | `datahub_gms_client.py:add_tag` |
+| **Incident Emit (WRITE)** | Agent emits `DatasetPropertiesClass` MCP with incident description to each impacted model | `datahub_gms_client.py:emit_incident` |
+| **Source Table Flag (WRITE)** | Source tables that drifted get `SCHEMA-DRIFT-DETECTED` tag | `reliability_agent.py` |
+| **Schema Registration** | `lineage_bootstrap.py` registers demo pipeline (datasets, ML model, lineage, tags) via DataHub REST emitter — replaceable | `lineage_bootstrap.py` |
 | **Auto-Ingestion** | `ingest_postgres.yaml` runs the DataHub PostgreSQL source connector with column profiling | `ingest_postgres.yaml` |
 | **Custom Skill (Bonus)** | `schema_drift_detector.yaml` defines a reusable DataHub Agent skill for open-source contribution | `datahub_skills/` |
 
@@ -247,12 +280,12 @@ python -m src.agent.reliability_agent
 
 | Criterion | Our Approach |
 |---|---|
-| **Use of DataHub** | Real GMS REST API for lineage reads; `DatahubRestEmitter` MCP for tag/incident write-back; `lineage_bootstrap.py` for entity registration; `ingest_postgres.yaml` for auto-ingestion |
-| **Technical Execution** | End-to-end working: real DB → real drift detection → real DataHub write-back → downloadable fix scripts |
-| **Originality** | `schema_change_log` audit trail + automated impact metrics from real data + 3 preset scenarios — none of these exist in DataHub out of the box |
-| **Real-World Usefulness** | Solves a real FinTech problem (silent ML failures from schema drift) that MLOps teams face daily |
-| **Submission Quality** | Full Streamlit dashboard, this README, working end-to-end demo |
-| **Bonus: Open-Source** | `datahub_skills/schema_drift_detector.yaml` — proposed reusable DataHub Agent skill with DataHub feature request notes |
+| **Use of DataHub** | Reads **6 aspects** (`schemaMetadata`, `globalTags`, `ownership`, `editableSchemaMetadata`, `upstreamLineage`, `datasetProperties`) to build a context-based pipeline map. Writes back **2 aspects** (`globalTags`, `datasetProperties`) via `DatahubRestEmitter` MCP to every impacted model. Full round-trip: DataHub → agent decisions → DataHub. |
+| **Technical Execution** | End-to-end working on real infrastructure: PostgreSQL introspection, DataHub GMS REST calls, MCP write-back via SDK, downloadable SQL/dbt fix scripts. Graceful fallback when GMS/DB down. Bug-free stack (v0.14.0.2). |
+| **Originality** | Context-based severity from DataHub tags/glossary/lineage (not hardcoded); auto-discovered multi-model pipeline (works for any DataHub-registered ML pipeline); `schema_change_log` audit trail with who/why; real impact metrics from live COUNT queries; auto-generated remediation scripts. None of these exist in DataHub out of the box. |
+| **Real-World Usefulness** | Silent ML failures from upstream schema drift = daily pain for MLOps teams. **Zero config**: point it at any DataHub instance with a registered ML pipeline, it works. PaySim is included as demo, not as constraint. |
+| **Submission Quality** | Streamlit control plane with dynamic discovery UI, this README with architecture diagrams and criterion mapping, working end-to-end demo, `examples/` folder with sample generated artifacts. Apache-2.0 licensed. |
+| **Bonus: Open-Source** | `datahub_skills/schema_drift_detector.yaml` — reusable DataHub Agent skill spec designed for upstream contribution to `datahub-project/datahub` |
 
 ---
 

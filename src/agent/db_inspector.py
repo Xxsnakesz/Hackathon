@@ -20,13 +20,14 @@ from typing import Optional
 
 logger = logging.getLogger("DBInspector")
 
-# Tables the agent monitors
-MONITORED_TABLES = ["paysim_raw_transactions", "feature_engineering_table"]
-
-# Path to the baseline JSON (used in simulation mode only)
+# Path to the baseline JSON (used in simulation mode fallback only)
 BASELINE_PATH = Path(__file__).parent / "schema_baseline.json"
 
-# Drift severity classification by column
+# Default fallback list — used only when no PipelineContext has been injected.
+# In normal (context-based) operation these are set from DataHub discovery.
+MONITORED_TABLES = ["paysim_raw_transactions", "feature_engineering_table"]
+
+# Default fallback critical columns — same story: overridden by PipelineContext.
 CRITICAL_COLUMNS = {
     "amount", "oldbalanceorg", "newbalanceorig",
     "oldbalancedest", "newbalancedest", "isfraud", "isflaggedfraud",
@@ -156,6 +157,7 @@ class PostgresSchemaInspector:
         self,
         host: str = None, port: int = None,
         database: str = None, user: str = None, password: str = None,
+        pipeline_context=None,
     ):
         # Try loading .env if available
         try:
@@ -171,9 +173,28 @@ class PostgresSchemaInspector:
         self.user     = user     or os.environ.get("POSTGRES_USER", "paysim_user")
         self.password = password or os.environ.get("POSTGRES_PASSWORD", "paysim_secret_2026")
 
+        # PipelineContext (from pipeline_discovery.discover_pipeline) — when set,
+        # overrides MONITORED_TABLES / CRITICAL_COLUMNS / baseline source with
+        # what DataHub knows. None = fall back to hardcoded PaySim defaults.
+        self.pipeline_context = pipeline_context
+
         self._conn = None
         self._mode: str = "unknown"
         self._connect()
+
+    def monitored_tables(self) -> list[str]:
+        """Effective list of tables to monitor (context-aware)."""
+        if self.pipeline_context is not None:
+            return self.pipeline_context.monitored_table_names or MONITORED_TABLES
+        return MONITORED_TABLES
+
+    def critical_columns_for(self, table_name: str) -> set[str]:
+        """Effective set of critical columns for a given table (context-aware)."""
+        if self.pipeline_context is not None:
+            crit = self.pipeline_context.critical_columns_for(table_name)
+            if crit:
+                return crit
+        return CRITICAL_COLUMNS  # fallback
 
     def _connect(self):
         try:
@@ -239,14 +260,34 @@ class PostgresSchemaInspector:
         ]
 
     def get_all_monitored_schemas(self) -> dict:
-        return {t: self.get_schema(t) for t in MONITORED_TABLES}
+        return {t: self.get_schema(t) for t in self.monitored_tables()}
 
     # ─────────────────────────────────────────────
     # Baseline from DB
     # ─────────────────────────────────────────────
 
     def get_baseline_from_db(self, table_name: str) -> list[dict]:
-        """Read baseline from schema_baseline table (live DB only)."""
+        """
+        Return baseline schema for a table. Priority:
+          1. PipelineContext (DataHub schemaMetadata) — most authoritative
+          2. schema_baseline table in Postgres
+          3. schema_baseline.json fallback
+        """
+        # 1. PipelineContext (DataHub-driven)
+        if self.pipeline_context is not None:
+            t = self.pipeline_context.source_tables.get(table_name)
+            if t and t.columns:
+                return [
+                    {
+                        "column": c.column,
+                        "type": c.baseline_type,
+                        "nullable": c.nullable,
+                        "is_critical": c.severity == "CRITICAL",
+                        "description": c.description,
+                    }
+                    for c in t.columns
+                ]
+
         if not self.is_live():
             return _load_baseline_json().get(table_name, [])
         try:
@@ -763,10 +804,18 @@ class PostgresSchemaInspector:
 # Drift Detection
 # =============================================================================
 
-def detect_drift(table_name: str, baseline: list[dict], actual: list[dict]) -> list[dict]:
+def detect_drift(
+    table_name: str,
+    baseline: list[dict],
+    actual: list[dict],
+    critical_columns: set[str] = None,
+) -> list[dict]:
     """
     Compare baseline vs actual schema. Returns list of drift events.
+    critical_columns is the effective critical set for THIS table (from context).
     """
+    if critical_columns is None:
+        critical_columns = CRITICAL_COLUMNS
     baseline_map = {f["column"].lower(): f for f in baseline}
     actual_map   = {f["column"].lower(): f for f in actual}
     now = datetime.now(timezone.utc).isoformat()
@@ -780,14 +829,14 @@ def detect_drift(table_name: str, baseline: list[dict], actual: list[dict]) -> l
                 "table": table_name, "column": col,
                 "baseline_type": base["type"], "actual_type": "MISSING",
                 "detected_at": now, "drift_type": "COLUMN_MISSING",
-                "severity": "CRITICAL" if col in CRITICAL_COLUMNS else "MEDIUM",
+                "severity": "CRITICAL" if col in critical_columns else "MEDIUM",
             })
         elif actual_map[col]["type"].lower() != base["type"].lower():
             drifts.append({
                 "table": table_name, "column": col,
                 "baseline_type": base["type"], "actual_type": actual_map[col]["type"],
                 "detected_at": now, "drift_type": "TYPE_CHANGE",
-                "severity": "CRITICAL" if col in CRITICAL_COLUMNS else "MEDIUM",
+                "severity": "CRITICAL" if col in critical_columns else "MEDIUM",
             })
 
     for col in actual_map:
@@ -805,8 +854,10 @@ def detect_drift(table_name: str, baseline: list[dict], actual: list[dict]) -> l
 def scan_all_drifts(inspector: PostgresSchemaInspector) -> dict:
     """
     Scan all monitored tables and return a full drift report.
-    Reads baseline from DB (schema_baseline table) or JSON fallback.
+    Baseline source (DataHub schemaMetadata > schema_baseline table > JSON) and
+    critical column set are both context-aware.
     """
+    tables_to_scan = inspector.monitored_tables()
     actual_all = inspector.get_all_monitored_schemas()
     report = {
         "mode": inspector.mode(),
@@ -817,9 +868,10 @@ def scan_all_drifts(inspector: PostgresSchemaInspector) -> dict:
         "any_drift": False,
     }
 
-    for table in MONITORED_TABLES:
+    for table in tables_to_scan:
         baseline = inspector.get_baseline_from_db(table)
         actual   = actual_all.get(table, [])
+        crit_cols = inspector.critical_columns_for(table)
 
         if not actual:
             report["tables"][table] = {
@@ -828,7 +880,7 @@ def scan_all_drifts(inspector: PostgresSchemaInspector) -> dict:
             }
             continue
 
-        drifts = detect_drift(table, baseline, actual)
+        drifts = detect_drift(table, baseline, actual, critical_columns=crit_cols)
         critical = [d for d in drifts if d.get("severity") == "CRITICAL"]
 
         report["tables"][table] = {

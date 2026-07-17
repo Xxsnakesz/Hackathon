@@ -381,6 +381,136 @@ class DatahubGmsClient:
         entity = self.get_entity(urn)
         return entity.get("tags", [])
 
+    # ─────────────────────────────────────────────────────────────────────
+    # DISCOVERY: Search datasets by platform + tag filter
+    # ─────────────────────────────────────────────────────────────────────
+
+    def search_datasets(self, platforms: list[str] = None, tags: list[str] = None, count: int = 50) -> list[dict]:
+        """
+        Find datasets whose URN platform matches any of `platforms` and whose
+        globalTags contain any of `tags`. Both filters are optional and combine
+        as AND when both provided.
+
+        Uses GMS search endpoint with wildcard input then filters in-memory.
+        Returns normalized entity dicts.
+        """
+        if not self._live:
+            results = []
+            for urn, meta in _FALLBACK_CATALOG.items():
+                if platforms and meta.get("platform", "").lower() not in [p.lower() for p in platforms]:
+                    continue
+                if tags and not any(t.lower() in [x.lower() for x in meta.get("tags", [])] for t in tags):
+                    continue
+                results.append({"urn": urn, "name": meta["name"], "platform": meta["platform"], "tags": meta.get("tags", [])})
+            return results
+
+        try:
+            payload = {"input": "*", "type": "DATASET", "start": 0, "count": count}
+            status, data = _http_post(
+                f"{self.gms_url}/entities?action=search", payload, timeout=15
+            )
+            if status != 200 or not data:
+                logger.warning(f"GMS search datasets failed: HTTP {status}")
+                return []
+            hits = data.get("value", {}).get("entities", [])
+            results = []
+            for h in hits:
+                urn = h.get("entity")
+                if not urn:
+                    continue
+                entity = self.get_entity(urn)
+                platform = entity.get("platform", "").lower()
+                entity_tags = [t.lower() for t in entity.get("tags", [])]
+                if platforms and platform not in [p.lower() for p in platforms]:
+                    continue
+                if tags and not any(t.lower() in entity_tags for t in tags):
+                    continue
+                results.append({
+                    "urn": urn,
+                    "name": entity.get("name", urn),
+                    "platform": entity.get("platform"),
+                    "tags": entity.get("tags", []),
+                })
+            logger.info(f"search_datasets(platforms={platforms}, tags={tags}): {len(results)} match")
+            return results
+        except Exception as exc:
+            logger.warning(f"search_datasets error: {exc}")
+            return []
+
+    def get_schema_metadata(self, urn: str) -> list[dict]:
+        """
+        Extract column list from schemaMetadata aspect.
+        Returns [{column: str, type: str, nullable: bool, description: str}].
+        Type mapping: DataHub type classes → PostgreSQL type names.
+        """
+        raw = self.get_entity(urn).get("_raw", {})
+        aspects = raw.get("aspects", {})
+        schema_aspect = aspects.get("schemaMetadata", {}).get("value", {})
+        fields_raw = schema_aspect.get("fields", [])
+        if not fields_raw:
+            return []
+
+        # DataHub type union → Postgres-ish name mapping
+        type_map = {
+            "NumberType": "double precision",
+            "StringType": "character varying",
+            "BooleanType": "boolean",
+            "DateType": "date",
+            "TimeType": "timestamp",
+            "BytesType": "bytea",
+            "EnumType": "character varying",
+        }
+
+        result = []
+        for f in fields_raw:
+            field_path = f.get("fieldPath", "").lower()
+            type_union = f.get("type", {}).get("type", {})
+            # type_union is like {"com.linkedin.schema.NumberType": {}} — extract classname
+            type_key = next(iter(type_union.keys()), "") if isinstance(type_union, dict) else ""
+            type_short = type_key.split(".")[-1] if "." in type_key else type_key
+            pg_type = type_map.get(type_short, "unknown")
+
+            result.append({
+                "column": field_path,
+                "type": pg_type,
+                "nullable": f.get("nullable", True),
+                "description": f.get("description", ""),
+                "datahub_type": type_short,
+            })
+        return result
+
+    def get_ownership(self, urn: str) -> list[str]:
+        """Return owner URNs/emails from ownership aspect."""
+        raw = self.get_entity(urn).get("_raw", {})
+        aspects = raw.get("aspects", {})
+        ownership = aspects.get("ownership", {}).get("value", {})
+        owners = ownership.get("owners", [])
+        return [o.get("owner", "") for o in owners if o.get("owner")]
+
+    def get_field_tags(self, urn: str, field_path: str) -> list[str]:
+        """
+        Return tags attached to a specific field via editableSchemaMetadata
+        or schemaMetadata field-level globalTags.
+        """
+        raw = self.get_entity(urn).get("_raw", {})
+        aspects = raw.get("aspects", {})
+
+        # editableSchemaMetadata has editableSchemaFieldInfo per field
+        esm = aspects.get("editableSchemaMetadata", {}).get("value", {})
+        for f in esm.get("editableSchemaFieldInfo", []):
+            if f.get("fieldPath", "").lower() == field_path.lower():
+                tags_raw = f.get("globalTags", {}).get("tags", [])
+                return [t.get("tag", "").replace("urn:li:tag:", "") for t in tags_raw]
+
+        # schemaMetadata may also carry field-level tags
+        sm = aspects.get("schemaMetadata", {}).get("value", {})
+        for f in sm.get("fields", []):
+            if f.get("fieldPath", "").lower() == field_path.lower():
+                tags_raw = f.get("globalTags", {}).get("tags", []) if f.get("globalTags") else []
+                return [t.get("tag", "").replace("urn:li:tag:", "") for t in tags_raw]
+
+        return []
+
 
 # =============================================================================
 # Fallback catalog & lineage (when DataHub GMS is not running)

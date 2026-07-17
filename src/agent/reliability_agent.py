@@ -28,13 +28,11 @@ from src.agent.fix_generator import save_fix_scripts
 from src.agent.db_inspector import (
     PostgresSchemaInspector,
     scan_all_drifts,
-    MONITORED_TABLES,
 )
-from src.agent.datahub_gms_client import (
-    DatahubGmsClient,
-    URN_RAW_TABLE,
-    URN_FEATURE_TABLE,
-    URN_ML_MODEL,
+from src.agent.datahub_gms_client import DatahubGmsClient
+from src.agent.pipeline_discovery import (
+    PipelineContext,
+    discover_pipeline,
 )
 
 logging.basicConfig(
@@ -43,6 +41,14 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("ReliabilityAgent")
+
+
+def _bare_table_name(urn: str) -> str:
+    """Strip URN wrapping to get the lowercase bare table name."""
+    if "," not in urn:
+        return urn.lower()
+    middle = urn.split(",")[-2]
+    return middle.split(".")[-1].lower()
 
 
 # =============================================================================
@@ -102,15 +108,32 @@ class ReliabilityAgent:
         datahub_client: DataHubClient = None,
         db_inspector: PostgresSchemaInspector = None,
         gms_url: str = None,
+        pipeline_context: PipelineContext = None,
+        auto_discover: bool = True,
     ):
         if datahub_client is None:
             datahub_client = DataHubClient(gms_url=gms_url)
-        if db_inspector is None:
-            db_inspector = PostgresSchemaInspector()
 
-        self.datahub = datahub_client
-        self.db = db_inspector
         self._gms: DatahubGmsClient = datahub_client._gms
+        self.datahub = datahub_client
+
+        # Discover pipeline from DataHub if not provided (context-based mode).
+        if pipeline_context is None and auto_discover:
+            try:
+                pipeline_context = discover_pipeline(self._gms)
+            except RuntimeError as exc:
+                logger.error(f"Pipeline discovery failed: {exc}")
+                raise
+
+        self.pipeline_context = pipeline_context
+
+        if db_inspector is None:
+            db_inspector = PostgresSchemaInspector(pipeline_context=pipeline_context)
+        else:
+            # ensure the inspector knows about the same context
+            db_inspector.pipeline_context = pipeline_context
+
+        self.db = db_inspector
         self.investigation_log: list = []
         self.findings: dict = {}
 
@@ -186,29 +209,27 @@ class ReliabilityAgent:
             self._log("STEP 2: Audit Trail",
                       "No entries in schema_change_log (drift may be external).")
 
-        # ── STEP 3: Real DataHub Lineage Traversal ────────────────────────
+        # ── STEP 3: Real DataHub Lineage Traversal (multi-model) ──────────
         self._log(
             "STEP 3",
-            f"Traversing lineage graph via DataHub GMS [{gms_mode}]... "
+            f"Traversing lineage graph via DataHub GMS [{gms_mode}] "
+            f"for {len(self.pipeline_context.ml_models)} discovered model(s)... "
             f"URL: {self._gms.gms_url}",
         )
 
-        # Start from ML model, traverse UPSTREAM
-        model_entity = self._gms.get_entity(URN_ML_MODEL)
-        model_name   = model_entity.get("name", "Fraud_Detection_ML_Model")
-        model_tags   = model_entity.get("tags", [])
-
-        upstream_l1 = self._gms.get_lineage(URN_ML_MODEL, "UPSTREAM")
-        lineage_lines = []
-        for l1 in upstream_l1:
-            lineage_lines.append(f"  ├─ {l1['name']} ({l1['platform']})")
-            upstream_l2 = self._gms.get_lineage(l1["urn"], "UPSTREAM")
-            for l2 in upstream_l2:
-                lineage_lines.append(f"  │    └─ {l2['name']} ({l2['platform']})")
-        lineage_trace = "\n".join(lineage_lines) or "  (direct source — no further upstream)"
+        lineage_lines: list[str] = []
+        for model_spec in self.pipeline_context.ml_models:
+            lineage_lines.append(f"◆ {model_spec.name} [{model_spec.platform}]")
+            upstream_l1 = self._gms.get_lineage(model_spec.urn, "UPSTREAM")
+            for l1 in upstream_l1:
+                lineage_lines.append(f"  ├─ {l1['name']} ({l1['platform']})")
+                upstream_l2 = self._gms.get_lineage(l1["urn"], "UPSTREAM")
+                for l2 in upstream_l2:
+                    lineage_lines.append(f"  │    └─ {l2['name']} ({l2['platform']})")
+        lineage_trace = "\n".join(lineage_lines) or "  (no lineage discovered)"
         self._log(
             "STEP 3: Lineage",
-            f"'{model_name}' upstream (from DataHub GMS [{gms_mode}]):\n{lineage_trace}",
+            f"Discovered pipeline graph:\n{lineage_trace}",
         )
 
         # ── STEP 4: Collect & Enrich Drift Events ────────────────────────
@@ -254,23 +275,35 @@ class ReliabilityAgent:
                 f"{d['baseline_type']} → {d['actual_type']} ({d['drift_type']}){who_str}"
             )
 
+        # Determine which discovered ML models are impacted by these drifts
+        # (an ML model is impacted iff its upstream table set intersects affected_tables)
+        impacted_models = []
+        for m in self.pipeline_context.ml_models:
+            model_upstream_names = {
+                _bare_table_name(u) for u in m.upstream_tables
+            }
+            if model_upstream_names & set(affected_tables):
+                impacted_models.append(m)
+
+        impacted_names = [m.name for m in impacted_models] or ["(no downstream model)"]
+
         root_cause = (
             f"SCHEMA DRIFT DETECTED in: {', '.join(affected_tables)}\n\n"
+            f"Impacted ML model(s): {', '.join(impacted_names)}\n\n"
             f"Affected columns ({len(all_drifts)} drift(s), {len(critical_drifts)} CRITICAL):\n"
             + "\n".join(drift_lines)
             + f"\n\n{impact_summary}\n\n"
-            "Root cause: schema change(s) made to upstream table(s) without coordinating "
-            f"with ML consumers. Critical numeric features used by '{model_name}' were "
-            "changed to incompatible types, breaking all numerical operations in the "
-            "feature engineering pipeline."
+            "Root cause: schema change(s) on source table(s) not coordinated with "
+            "downstream ML consumers. Column type changes break numerical operations "
+            "in downstream feature engineering, causing silent inference failures."
         )
         self._log("STEP 6: Root Cause", root_cause)
 
-        # ── STEP 7: Remediation — Real DataHub Write-Back ─────────────────
+        # ── STEP 7: Remediation — Multi-Model DataHub Write-Back ──────────
         self._log(
             "STEP 7",
             f"Executing remediation via DataHub GMS [{gms_mode}]: "
-            "writing tags + generating fix scripts...",
+            f"tagging {len(impacted_models)} impacted model(s) + generating fix scripts...",
         )
 
         incident_tag  = "DATA-INCIDENT: DO NOT USE"
@@ -282,14 +315,19 @@ class ReliabilityAgent:
             f"{datetime.now(timezone.utc).isoformat()}."
         )
 
-        # Write tags to DataHub GMS (real API call or fallback)
-        tag_ok = self._gms.add_tag(URN_ML_MODEL, incident_tag)
-        self._gms.emit_incident(URN_ML_MODEL, f"[INCIDENT] {incident_tag}", incident_desc)
+        tag_results = {}
+        for m in impacted_models:
+            ok = self._gms.add_tag(m.urn, incident_tag)
+            self._gms.emit_incident(m.urn, f"[INCIDENT] {incident_tag}", incident_desc)
+            tag_results[m.urn] = ok
 
+        tag_ok = all(tag_results.values()) if tag_results else False
+
+        # Tag source tables directly using their URN from context (no fuzzy search)
         for tname in affected_tables:
-            results = self._gms.search(tname)
-            for e in results:
-                self._gms.add_tag(e["urn"], "SCHEMA-DRIFT-DETECTED")
+            src = self.pipeline_context.source_tables.get(tname)
+            if src:
+                self._gms.add_tag(src.urn, "SCHEMA-DRIFT-DETECTED")
 
         # Generate SQL + dbt fix scripts
         examples_dir = Path(__file__).parent.parent.parent / "examples"
@@ -307,17 +345,22 @@ class ReliabilityAgent:
 
         self._log(
             "STEP 7: Remediation Complete",
-            f"Tag '{incident_tag}' → {model_name} via DataHub GMS [{gms_mode}]. "
-            f"Generated {len(fix_results)} fix script(s).",
+            f"Tag '{incident_tag}' → {len(impacted_models)} model(s) via DataHub GMS [{gms_mode}]: "
+            f"{', '.join(impacted_names)}. Generated {len(fix_results)} fix script(s).",
         )
 
         # ── Final Report ──────────────────────────────────────────────────
         first = all_drifts[0]
+        primary_model = impacted_models[0] if impacted_models else None
+        model_name = primary_model.name if primary_model else "(no model impacted)"
+        model_urn = primary_model.urn if primary_model else "N/A"
+        platform = primary_model.platform if primary_model else "N/A"
+
         report = ROOT_CAUSE_REPORT_TEMPLATE.format(
             alert_summary=alert_message[:300],
             model_name=model_name,
-            model_urn=URN_ML_MODEL,
-            platform=model_entity.get("platform", "mlflow"),
+            model_urn=model_urn,
+            platform=platform,
             lineage_trace=lineage_trace,
             affected_dataset=", ".join(affected_tables),
             affected_column=", ".join(affected_columns),
@@ -329,17 +372,18 @@ class ReliabilityAgent:
             recommendations=(
                 "1. Apply generated SQL fix scripts from examples/\n"
                 "2. Verify schema matches baseline in Schema Monitor tab\n"
-                "3. Re-run: python metadata/lineage_bootstrap.py (to re-sync DataHub)\n"
-                "4. Retrain/revalidate the Fraud Detection ML model\n"
-                "5. Remove DATA-INCIDENT tag from model in DataHub UI\n"
+                "3. Re-run pipeline registration to re-sync DataHub if source schema changed intentionally\n"
+                "4. Retrain/revalidate impacted ML model(s)\n"
+                "5. Remove DATA-INCIDENT tag from model(s) in DataHub UI once resolved\n"
                 "6. Add schema change alerts/assertions to prevent recurrence"
             ),
         )
 
         results = {
             "status": "incident_detected",
+            "impacted_models": [{"urn": m.urn, "name": m.name, "platform": m.platform} for m in impacted_models],
             "model_name": model_name,
-            "model_urn": URN_ML_MODEL,
+            "model_urn": model_urn,
             "datahub_gms_mode": gms_mode,
             "db_mode": db_mode,
             "drift_report": drift_report,
@@ -350,6 +394,7 @@ class ReliabilityAgent:
             "root_cause": root_cause,
             "tag_applied": incident_tag,
             "tag_success": tag_ok,
+            "tag_results": tag_results,
             "fix_scripts": fix_results,
             "report": report,
             "investigation_log": self.investigation_log,
@@ -414,11 +459,37 @@ def main():
 
     parser = argparse.ArgumentParser(description="AI Data Reliability Agent")
     parser.add_argument("--gms-url", default=os.environ.get("DATAHUB_GMS_URL", "http://localhost:8085"))
+    parser.add_argument("--ml-platforms", default=os.environ.get("ML_PLATFORMS"),
+                        help="Comma-separated ML platform whitelist (e.g., mlflow,sagemaker)")
+    parser.add_argument("--tag-filter", default=os.environ.get("ML_TAG_FILTER"),
+                        help="Comma-separated tag filter for ML models (default: production)")
     args = parser.parse_args()
 
-    db_inspector = PostgresSchemaInspector()
-    datahub      = DataHubClient(gms_url=args.gms_url)
-    agent        = ReliabilityAgent(datahub_client=datahub, db_inspector=db_inspector)
+    datahub = DataHubClient(gms_url=args.gms_url)
+
+    # Discover pipeline explicitly so CLI can print the context before scanning.
+    ml_platforms = args.ml_platforms.split(",") if args.ml_platforms else None
+    tag_filter   = args.tag_filter.split(",")   if args.tag_filter   else None
+    try:
+        ctx = discover_pipeline(datahub._gms, ml_platforms=ml_platforms, tag_filter=tag_filter)
+    except RuntimeError as exc:
+        print(f"\n❌ {exc}\n")
+        sys.exit(2)
+
+    print()
+    print("=" * 70)
+    print("🔎 Discovered Pipeline Context")
+    print("=" * 70)
+    print(ctx.summary())
+    print()
+
+    db_inspector = PostgresSchemaInspector(pipeline_context=ctx)
+    agent = ReliabilityAgent(
+        datahub_client=datahub,
+        db_inspector=db_inspector,
+        pipeline_context=ctx,
+        auto_discover=False,   # already discovered above
+    )
 
     alert   = ALERT_TEMPLATE.format(**DEMO_ALERT_VALUES)
     results = agent.investigate(alert)

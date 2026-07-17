@@ -33,6 +33,7 @@ from src.agent.db_inspector import (
 from src.agent.reliability_agent import DataHubClient, ReliabilityAgent
 from src.agent.prompts import ALERT_TEMPLATE, DEMO_ALERT_VALUES
 from src.agent.data_seeder import seed_transactions, check_data_loaded
+from src.agent.pipeline_discovery import discover_pipeline, PipelineContext
 
 # =============================================================================
 # Page config
@@ -201,15 +202,42 @@ div[data-testid="stMarkdownContainer"] { color:#cbd5e1; }
 # =============================================================================
 # Session State Helpers
 # =============================================================================
-def get_inspector() -> PostgresSchemaInspector:
-    if "inspector" not in st.session_state:
-        st.session_state.inspector = PostgresSchemaInspector()
-    return st.session_state.inspector
-
 def get_datahub() -> DataHubClient:
     if "datahub" not in st.session_state:
         st.session_state.datahub = DataHubClient()
     return st.session_state.datahub
+
+
+def get_pipeline_context() -> "PipelineContext | None":
+    """
+    Discover pipeline from DataHub. Cached in session_state.
+    Returns None if discovery fails (agent will still function on hardcoded fallback).
+    """
+    if "pipeline_context" in st.session_state:
+        return st.session_state.pipeline_context
+    try:
+        gms = get_datahub()._gms
+        ctx = discover_pipeline(gms)
+        st.session_state.pipeline_context = ctx
+        return ctx
+    except RuntimeError as exc:
+        st.session_state.pipeline_context = None
+        st.session_state.pipeline_context_error = str(exc)
+        return None
+
+
+def rediscover_pipeline():
+    """Force re-discovery. Call after registering new metadata."""
+    st.session_state.pop("pipeline_context", None)
+    st.session_state.pop("pipeline_context_error", None)
+    st.session_state.pop("inspector", None)  # rebuild inspector with new context
+
+
+def get_inspector() -> PostgresSchemaInspector:
+    if "inspector" not in st.session_state:
+        ctx = get_pipeline_context()
+        st.session_state.inspector = PostgresSchemaInspector(pipeline_context=ctx)
+    return st.session_state.inspector
 
 def refresh_inspector():
     for k in ["inspector", "drift_cache", "last_results"]:
@@ -341,6 +369,34 @@ with st.sidebar:
 
     if st.button("🔄 Reconnect DB"):
         refresh_inspector()
+        st.rerun()
+
+    # ── Discovered Pipeline (from DataHub) ──────────────────────────────
+    st.markdown("---")
+    st.markdown("**🕸️ Discovered Pipeline**")
+    ctx = get_pipeline_context()
+    if ctx is None:
+        err = st.session_state.get("pipeline_context_error", "unknown")
+        st.error("No pipeline discovered from DataHub.")
+        with st.expander("Why?"):
+            st.caption(err)
+        st.caption(
+            "Register at least one ML pipeline in DataHub, then click Rediscover. "
+            "See `metadata/lineage_bootstrap.py` as reference."
+        )
+    else:
+        st.caption(f"✅ {len(ctx.ml_models)} model(s), {len(ctx.source_tables)} table(s)")
+        with st.expander("Models"):
+            for m in ctx.ml_models:
+                st.caption(f"• `{m.name}` [{m.platform}]")
+        with st.expander("Source tables"):
+            for t in ctx.source_tables.values():
+                crit_n = len(ctx.critical_columns_for(t.table_name))
+                st.caption(f"• `{t.table_name}` — {len(t.columns)} cols ({crit_n} critical)")
+        st.caption(f"Filter: platform ∈ {ctx.ml_platforms_filter} · tag ∈ {ctx.tag_filter}")
+
+    if st.button("🔄 Rediscover from DataHub"):
+        rediscover_pipeline()
         st.rerun()
 
     # Data seeding section (live mode only)
@@ -723,18 +779,33 @@ with tab_simulate:
 
     # ── Custom Drift ─────────────────────────────────────────────────────
     st.markdown("#### 🛠️ Custom Drift")
+    # Table/column options come from the discovered pipeline (falls back to JSON).
+    ctx = get_pipeline_context()
+    if ctx is not None and ctx.source_tables:
+        table_options = list(ctx.source_tables.keys())
+        def _cols_for(t):
+            spec = ctx.source_tables.get(t)
+            return [c.column for c in spec.columns] if spec else []
+        def _base_type_for(t, col):
+            spec = ctx.source_tables.get(t)
+            if not spec:
+                return "double precision"
+            return next((c.baseline_type for c in spec.columns if c.column == col), "double precision")
+    else:
+        baseline_all = _load_baseline_json()
+        table_options = MONITORED_TABLES
+        def _cols_for(t):
+            return [f["column"] for f in baseline_all.get(t, [])]
+        def _base_type_for(t, col):
+            return next((f["type"] for f in baseline_all.get(t, []) if f["column"] == col), "double precision")
+
     cc1, cc2, cc3 = st.columns([2, 2, 2])
     with cc1:
-        drift_table = st.selectbox("Table", MONITORED_TABLES, key="cust_table")
+        drift_table = st.selectbox("Table", table_options, key="cust_table")
     with cc2:
-        baseline_all = _load_baseline_json()
-        table_cols   = [f["column"] for f in baseline_all.get(drift_table, [])]
-        drift_col    = st.selectbox("Column", table_cols, key="cust_col")
+        drift_col = st.selectbox("Column", _cols_for(drift_table), key="cust_col")
     with cc3:
-        base_type = next(
-            (f["type"] for f in baseline_all.get(drift_table, []) if f["column"] == drift_col),
-            "double precision",
-        )
+        base_type = _base_type_for(drift_table, drift_col)
         bad_types = {
             "double precision": ["character varying", "text", "varchar(50)"],
             "integer":          ["character varying", "text", "boolean"],
