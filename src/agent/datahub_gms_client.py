@@ -166,21 +166,68 @@ class DatahubGmsClient:
             logger.warning(f"GMS get_entity failed: {exc} — using fallback")
             return _FALLBACK_CATALOG.get(urn, {})
 
+    def _extract_aspects(self, raw: dict) -> dict:
+        """
+        DataHub GMS /entities response format (restli):
+            { "value": { "com.linkedin.metadata.snapshot.DatasetSnapshot": {
+                "urn": "...",
+                "aspects": [
+                    { "com.linkedin.common.GlobalTags": { "tags": [...] } },
+                    { "com.linkedin.dataset.DatasetProperties": { ... } },
+                    ...
+                ]
+            }}}
+        Flatten to { "globalTags": {...}, "datasetProperties": {...}, ... }
+        so callers can look up by short aspect name.
+        """
+        # Unwrap value.<snapshot-class>
+        value = raw.get("value", raw)
+        if isinstance(value, dict):
+            # find the first key that looks like a snapshot classname
+            for k, v in value.items():
+                if "Snapshot" in k and isinstance(v, dict):
+                    value = v
+                    break
+
+        aspects_list = value.get("aspects", [])
+        out: dict = {}
+        for item in aspects_list:
+            if not isinstance(item, dict) or not item:
+                continue
+            fq = next(iter(item.keys()))
+            body = item[fq]
+            short = fq.split(".")[-1]
+            # normalize: first char lowercase → "GlobalTags" -> "globalTags"
+            short = short[0].lower() + short[1:] if short else short
+            out[short] = body
+        return out
+
     def _normalize_entity(self, raw: dict, urn: str) -> dict:
         """Extract useful fields from raw GMS entity response."""
-        aspects = raw.get("aspects", {})
-        props = aspects.get("datasetProperties", {}).get("value", {})
-        name = props.get("name") or urn.split(",")[-2] if "," in urn else urn
+        aspects = self._extract_aspects(raw)
+        props = aspects.get("datasetProperties", {}) or {}
+        name = props.get("name") or (urn.split(",")[-2] if "," in urn else urn)
 
-        tags_raw = aspects.get("globalTags", {}).get("value", {}).get("tags", [])
+        tags_raw = (aspects.get("globalTags", {}) or {}).get("tags", [])
         tags = [t.get("tag", "").replace("urn:li:tag:", "") for t in tags_raw]
+
+        # platform: prefer explicit DatasetKey aspect, fall back to URN parsing
+        dsk = aspects.get("datasetKey", {}) or {}
+        platform_urn = dsk.get("platform", "")
+        if platform_urn.startswith("urn:li:dataPlatform:"):
+            platform = platform_urn.split(":")[-1]
+        elif "dataPlatform:" in urn:
+            platform = urn.split("dataPlatform:")[-1].split(",")[0]
+        else:
+            platform = "unknown"
 
         return {
             "urn": urn,
             "name": name,
             "description": props.get("description", ""),
             "tags": tags,
-            "platform": urn.split("dataPlatform:")[-1].split(",")[0] if "dataPlatform:" in urn else "unknown",
+            "platform": platform,
+            "_aspects": aspects,  # flattened, keyed by short name
             "_raw": raw,
         }
 
@@ -405,17 +452,23 @@ class DatahubGmsClient:
             return results
 
         try:
-            payload = {"input": "*", "type": "DATASET", "start": 0, "count": count}
+            payload = {"input": "*", "entity": "dataset", "start": 0, "count": count}
             status, data = _http_post(
                 f"{self.gms_url}/entities?action=search", payload, timeout=15
             )
             if status != 200 or not data:
                 logger.warning(f"GMS search datasets failed: HTTP {status}")
                 return []
-            hits = data.get("value", {}).get("entities", [])
+            value = data.get("value", {}) if isinstance(data, dict) else {}
+            hits = value.get("entities", []) or []
             results = []
             for h in hits:
-                urn = h.get("entity")
+                # Response can be {"entity": "urn:..."} OR {"entity": {"urn": "..."}}
+                ent = h.get("entity")
+                if isinstance(ent, dict):
+                    urn = ent.get("urn", "")
+                else:
+                    urn = ent or ""
                 if not urn:
                     continue
                 entity = self.get_entity(urn)
@@ -441,16 +494,13 @@ class DatahubGmsClient:
         """
         Extract column list from schemaMetadata aspect.
         Returns [{column: str, type: str, nullable: bool, description: str}].
-        Type mapping: DataHub type classes → PostgreSQL type names.
         """
-        raw = self.get_entity(urn).get("_raw", {})
-        aspects = raw.get("aspects", {})
-        schema_aspect = aspects.get("schemaMetadata", {}).get("value", {})
+        aspects = self.get_entity(urn).get("_aspects", {})
+        schema_aspect = aspects.get("schemaMetadata", {}) or {}
         fields_raw = schema_aspect.get("fields", [])
         if not fields_raw:
             return []
 
-        # DataHub type union → Postgres-ish name mapping
         type_map = {
             "NumberType": "double precision",
             "StringType": "character varying",
@@ -465,7 +515,6 @@ class DatahubGmsClient:
         for f in fields_raw:
             field_path = f.get("fieldPath", "").lower()
             type_union = f.get("type", {}).get("type", {})
-            # type_union is like {"com.linkedin.schema.NumberType": {}} — extract classname
             type_key = next(iter(type_union.keys()), "") if isinstance(type_union, dict) else ""
             type_short = type_key.split(".")[-1] if "." in type_key else type_key
             pg_type = type_map.get(type_short, "unknown")
@@ -481,9 +530,8 @@ class DatahubGmsClient:
 
     def get_ownership(self, urn: str) -> list[str]:
         """Return owner URNs/emails from ownership aspect."""
-        raw = self.get_entity(urn).get("_raw", {})
-        aspects = raw.get("aspects", {})
-        ownership = aspects.get("ownership", {}).get("value", {})
+        aspects = self.get_entity(urn).get("_aspects", {})
+        ownership = aspects.get("ownership", {}) or {}
         owners = ownership.get("owners", [])
         return [o.get("owner", "") for o in owners if o.get("owner")]
 
@@ -492,21 +540,19 @@ class DatahubGmsClient:
         Return tags attached to a specific field via editableSchemaMetadata
         or schemaMetadata field-level globalTags.
         """
-        raw = self.get_entity(urn).get("_raw", {})
-        aspects = raw.get("aspects", {})
+        aspects = self.get_entity(urn).get("_aspects", {})
 
-        # editableSchemaMetadata has editableSchemaFieldInfo per field
-        esm = aspects.get("editableSchemaMetadata", {}).get("value", {})
+        esm = aspects.get("editableSchemaMetadata", {}) or {}
         for f in esm.get("editableSchemaFieldInfo", []):
             if f.get("fieldPath", "").lower() == field_path.lower():
-                tags_raw = f.get("globalTags", {}).get("tags", [])
+                tags_raw = (f.get("globalTags", {}) or {}).get("tags", [])
                 return [t.get("tag", "").replace("urn:li:tag:", "") for t in tags_raw]
 
-        # schemaMetadata may also carry field-level tags
-        sm = aspects.get("schemaMetadata", {}).get("value", {})
+        sm = aspects.get("schemaMetadata", {}) or {}
         for f in sm.get("fields", []):
             if f.get("fieldPath", "").lower() == field_path.lower():
-                tags_raw = f.get("globalTags", {}).get("tags", []) if f.get("globalTags") else []
+                gt = f.get("globalTags") or {}
+                tags_raw = gt.get("tags", [])
                 return [t.get("tag", "").replace("urn:li:tag:", "") for t in tags_raw]
 
         return []
