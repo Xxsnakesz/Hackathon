@@ -780,9 +780,13 @@ with tab_simulate:
     # ── Custom Drift ─────────────────────────────────────────────────────
     st.markdown("#### 🛠️ Custom Drift")
     # Table/column options come from the discovered pipeline (falls back to JSON).
+    # Views are filtered out — they can't be ALTERed independently.
     ctx = get_pipeline_context()
+    monitored_only = set(inspector.monitored_tables())
     if ctx is not None and ctx.source_tables:
-        table_options = list(ctx.source_tables.keys())
+        table_options = [t for t in ctx.source_tables.keys() if t in monitored_only]
+        if not table_options:
+            table_options = list(ctx.source_tables.keys())  # last-resort fallback
         def _cols_for(t):
             spec = ctx.source_tables.get(t)
             return [c.column for c in spec.columns] if spec else []
