@@ -238,16 +238,23 @@ class DatahubGmsClient:
     def get_lineage(self, urn: str, direction: str = "UPSTREAM", count: int = 10) -> list:
         """
         Fetch upstream or downstream lineage for an entity from DataHub GMS.
-        API: GET /relationships?urn={urn}&direction={direction}&types=DownstreamOf
+
+        DataHub's DownstreamOf edge means "source is downstream of target"
+        (target feeds source). RelationshipDirection accepts INCOMING /
+        OUTGOING / UNDIRECTED — NOT UPSTREAM/DOWNSTREAM.
+
+        UPSTREAM lookup   → OUTGOING DownstreamOf edges (this entity → its parents)
+        DOWNSTREAM lookup → INCOMING DownstreamOf edges (children → this entity)
         """
         if not self._live:
             return self._fallback_lineage(urn, direction)
+        rest_direction = "OUTGOING" if direction.upper() == "UPSTREAM" else "INCOMING"
         try:
             status, data = _http_get(
                 f"{self.gms_url}/relationships",
                 params={
                     "urn": urn,
-                    "direction": direction.upper(),
+                    "direction": rest_direction,
                     "types": "DownstreamOf",
                     "count": count,
                 },
