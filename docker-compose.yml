@@ -267,7 +267,6 @@ services:
       # Elasticsearch
       ELASTICSEARCH_HOST: elasticsearch
       ELASTICSEARCH_PORT: "9200"
-      ELASTICSEARCH_INDEX_BUILDER: "true"
       GRAPH_SERVICE_IMPL: elasticsearch
 
       # Neo4j disabled (use ES for graph)
