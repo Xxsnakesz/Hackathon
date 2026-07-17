@@ -1033,11 +1033,17 @@ with tab_info:
         ts = inspector.get_table_stats()
         if ts.get("total_rows", 0):
             sc1, sc2, sc3, sc4 = st.columns(4)
+            # Defensive: fields can be None when drift breaks numeric ops
+            total_rows_v    = ts.get("total_rows") or 0
+            fraud_rows_v    = ts.get("fraud_rows") or 0
+            fraud_rate_v    = ts.get("fraud_rate_pct") or 0
+            avg_amount_v    = ts.get("avg_amount")
+            avg_amount_str  = f"${avg_amount_v:,.2f}" if isinstance(avg_amount_v, (int, float)) else "N/A (drifted)"
             for col, label, val in [
-                (sc1, "Total Transactions", f"{ts['total_rows']:,}"),
-                (sc2, "Fraud Cases",        f"{ts.get('fraud_rows', 0):,}"),
-                (sc3, "Fraud Rate",         f"{ts.get('fraud_rate_pct', 0):.4f}%"),
-                (sc4, "Avg Amount",         f"${ts.get('avg_amount', 0):,.2f}"),
+                (sc1, "Total Transactions", f"{total_rows_v:,}"),
+                (sc2, "Fraud Cases",        f"{fraud_rows_v:,}"),
+                (sc3, "Fraud Rate",         f"{fraud_rate_v:.4f}%"),
+                (sc4, "Avg Amount",         avg_amount_str),
             ]:
                 with col:
                     col.markdown(
