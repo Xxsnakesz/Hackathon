@@ -408,21 +408,51 @@ class PostgresSchemaInspector:
             return True, msg
 
         # --- Live DB: ALTER TABLE ---
+        # Postgres refuses to alter a column that is referenced by a view.
+        # Capture dependent views, drop them, ALTER, then recreate — all in one transaction.
         safe_type = new_pg_type.upper().replace(";", "").replace("--", "")
-        sql = f"""
-            ALTER TABLE {schema_name}.{table}
-            ALTER COLUMN {column}
-            TYPE {safe_type}
-            USING {column}::text::{safe_type};
-        """
         try:
             cur = self._conn.cursor()
-            cur.execute(sql)
+
+            # Find views that reference this column
+            cur.execute(
+                """
+                SELECT DISTINCT v.viewname, pg_get_viewdef(c.oid, true) AS def
+                FROM pg_class c
+                JOIN pg_views v ON v.viewname = c.relname AND v.schemaname = %s
+                JOIN pg_rewrite r ON r.ev_class = c.oid
+                JOIN pg_depend d ON d.objid = r.oid
+                JOIN pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid
+                JOIN pg_class t ON t.oid = d.refobjid
+                WHERE c.relkind = 'v'
+                  AND t.relname = %s
+                  AND a.attname = %s
+                """,
+                (schema_name, table, column.lower()),
+            )
+            dependent_views = cur.fetchall()
+
+            for view_name, _ in dependent_views:
+                cur.execute(f"DROP VIEW {schema_name}.{view_name} CASCADE")
+                logger.info(f"  ↪ Dropped dependent view: {view_name}")
+
+            cur.execute(
+                f"ALTER TABLE {schema_name}.{table} "
+                f"ALTER COLUMN {column} TYPE {safe_type} "
+                f"USING {column}::text::{safe_type}"
+            )
+
+            for view_name, view_def in dependent_views:
+                cur.execute(f"CREATE VIEW {schema_name}.{view_name} AS {view_def}")
+                logger.info(f"  ↪ Recreated view: {view_name}")
+
             self._conn.commit()
             cur.close()
-            # Log to audit table
+
             self.log_schema_change_to_db(table, column, old_type, new_pg_type, changed_by, reason, severity)
             msg = f"Altered {table}.{column}: {old_type} → {new_pg_type}"
+            if dependent_views:
+                msg += f" (recreated {len(dependent_views)} dependent view(s))"
             logger.info(f"✅ {msg}")
             return True, msg
         except Exception as exc:
@@ -462,19 +492,45 @@ class PostgresSchemaInspector:
         }
         ddl_type = pg_type_ddl_map.get(baseline_type.lower(), baseline_type.upper())
 
-        sql = f"""
-            ALTER TABLE {schema_name}.{table}
-            ALTER COLUMN {column}
-            TYPE {ddl_type}
-            USING {column}::text::{ddl_type.lower().replace(' ', '_')};
-        """
+        cast_type = ddl_type.lower().replace(" ", "_") if ddl_type.lower() != "double precision" else "double precision"
         try:
             cur = self._conn.cursor()
-            cur.execute(sql)
+
+            cur.execute(
+                """
+                SELECT DISTINCT v.viewname, pg_get_viewdef(c.oid, true) AS def
+                FROM pg_class c
+                JOIN pg_views v ON v.viewname = c.relname AND v.schemaname = %s
+                JOIN pg_rewrite r ON r.ev_class = c.oid
+                JOIN pg_depend d ON d.objid = r.oid
+                JOIN pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid
+                JOIN pg_class t ON t.oid = d.refobjid
+                WHERE c.relkind = 'v'
+                  AND t.relname = %s
+                  AND a.attname = %s
+                """,
+                (schema_name, table, column.lower()),
+            )
+            dependent_views = cur.fetchall()
+
+            for view_name, _ in dependent_views:
+                cur.execute(f"DROP VIEW {schema_name}.{view_name} CASCADE")
+
+            cur.execute(
+                f"ALTER TABLE {schema_name}.{table} "
+                f"ALTER COLUMN {column} TYPE {ddl_type} "
+                f"USING {column}::text::{cast_type}"
+            )
+
+            for view_name, view_def in dependent_views:
+                cur.execute(f"CREATE VIEW {schema_name}.{view_name} AS {view_def}")
+
             self._conn.commit()
             cur.close()
             self.mark_change_reverted(table, column)
             msg = f"Restored {table}.{column} → {ddl_type}"
+            if dependent_views:
+                msg += f" (recreated {len(dependent_views)} dependent view(s))"
             logger.info(f"✅ {msg}")
             return True, msg
         except Exception as exc:
