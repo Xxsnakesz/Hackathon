@@ -149,7 +149,7 @@ services:
 
   # --- MySQL schema setup ---
   datahub-mysql-setup:
-    image: acryldata/datahub-mysql-setup:v0.14.0
+    image: acryldata/datahub-mysql-setup:v0.14.0.2
     container_name: datahub-mysql-setup
     environment:
       MYSQL_HOST: mysql
@@ -165,7 +165,7 @@ services:
 
   # --- Elasticsearch index setup ---
   datahub-elasticsearch-setup:
-    image: acryldata/datahub-elasticsearch-setup:v0.14.0
+    image: acryldata/datahub-elasticsearch-setup:v0.14.0.2
     container_name: datahub-elasticsearch-setup
     environment:
       ELASTICSEARCH_HOST: elasticsearch
@@ -180,7 +180,7 @@ services:
 
   # --- Kafka topic setup ---
   datahub-kafka-setup:
-    image: acryldata/datahub-kafka-setup:v0.14.0
+    image: acryldata/datahub-kafka-setup:v0.14.0.2
     container_name: datahub-kafka-setup
     environment:
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
@@ -197,7 +197,7 @@ services:
 
   # --- System Update (creates DataHub entity search indices, e.g. datahubpolicyindex_v2) ---
   datahub-upgrade:
-    image: acryldata/datahub-upgrade:v0.14.0
+    image: acryldata/datahub-upgrade:v0.14.0.2
     command: ["-u", "SystemUpdate"]
     environment:
       # MySQL connection
@@ -243,7 +243,7 @@ services:
 
   # --- DataHub GMS (Generalized Metadata Service) ---
   datahub-gms:
-    image: acryldata/datahub-gms:v0.14.0
+    image: acryldata/datahub-gms:v0.14.0.2
     container_name: datahub-gms
     restart: unless-stopped
     ports:
@@ -303,7 +303,7 @@ services:
 
   # --- DataHub Frontend ---
   datahub-frontend-react:
-    image: acryldata/datahub-frontend-react:v0.14.0
+    image: acryldata/datahub-frontend-react:v0.14.0.2
     container_name: datahub-frontend
     restart: unless-stopped
     ports:
