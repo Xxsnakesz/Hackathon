@@ -147,8 +147,9 @@ def _traverse_upstream(
     visited: Optional[set] = None,
 ) -> list[str]:
     """
-    BFS traverse UPSTREAM from start_urn. Stop and collect any entity whose
-    platform is in source_platforms (leaf source tables). Returns list of URNs.
+    Traverse UPSTREAM from start_urn and collect EVERY entity along the way
+    whose platform is in source_platforms. Views and their underlying tables
+    are all monitored — a view's upstream base table is a real source too.
     """
     if visited is None:
         visited = set()
@@ -160,14 +161,16 @@ def _traverse_upstream(
     upstream = gms.get_lineage(start_urn, direction="UPSTREAM")
     for u in upstream:
         u_urn = u.get("urn", "")
+        if not u_urn or u_urn in visited:
+            continue
         u_platform = u.get("platform", "").lower() or _parse_platform_from_urn(u_urn)
         if u_platform in [p.lower() for p in source_platforms]:
             sources.append(u_urn)
-        else:
-            # not a leaf source table — keep going up
-            sources.extend(
-                _traverse_upstream(gms, u_urn, source_platforms, max_hops - 1, visited)
-            )
+        # Regardless of whether we collected it or not, keep walking up —
+        # a source-platform entity may still be a VIEW with real tables above it.
+        sources.extend(
+            _traverse_upstream(gms, u_urn, source_platforms, max_hops - 1, visited)
+        )
     return sources
 
 

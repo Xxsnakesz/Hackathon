@@ -563,8 +563,8 @@ class DatahubGmsClient:
 # These mirror exactly what lineage_bootstrap.py registers.
 # =============================================================================
 
-_URN_RAW     = "urn:li:dataset:(urn:li:dataPlatform:postgres,paysim_fintech.public.paysim_raw_transactions,PROD)"
-_URN_FEATURE = "urn:li:dataset:(urn:li:dataPlatform:postgres,paysim_fintech.public.feature_engineering_table,PROD)"
+_URN_RAW     = "urn:li:dataset:(urn:li:dataPlatform:postgres,paysim_raw_transactions,PROD)"
+_URN_FEATURE = "urn:li:dataset:(urn:li:dataPlatform:postgres,feature_engineering_table,PROD)"
 _URN_MODEL   = "urn:li:dataset:(urn:li:dataPlatform:mlflow,Fraud_Detection_ML_Model,PROD)"
 
 _FALLBACK_CATALOG: dict = {
