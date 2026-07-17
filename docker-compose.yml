@@ -144,6 +144,58 @@ services:
       - datahub-network
 
   # =============================================================
+  # DataHub Setup Jobs (run once, create indices/schema/topics)
+  # =============================================================
+
+  # --- MySQL schema setup ---
+  datahub-mysql-setup:
+    image: acryldata/datahub-mysql-setup:v0.14.0
+    container_name: datahub-mysql-setup
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_USERNAME: datahub
+      MYSQL_PASSWORD: datahub
+      DATAHUB_DB_NAME: datahub
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - datahub-network
+
+  # --- Elasticsearch index setup ---
+  datahub-elasticsearch-setup:
+    image: acryldata/datahub-elasticsearch-setup:v0.14.0
+    container_name: datahub-elasticsearch-setup
+    environment:
+      ELASTICSEARCH_HOST: elasticsearch
+      ELASTICSEARCH_PORT: "9200"
+      ELASTICSEARCH_PROTOCOL: http
+      USE_AWS_ELASTICSEARCH: "false"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    networks:
+      - datahub-network
+
+  # --- Kafka topic setup ---
+  datahub-kafka-setup:
+    image: acryldata/datahub-kafka-setup:v0.14.0
+    container_name: datahub-kafka-setup
+    environment:
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_BOOTSTRAP_SERVER: broker:29092
+      USE_CONFLUENT_SCHEMA_REGISTRY: "true"
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+    depends_on:
+      broker:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+    networks:
+      - datahub-network
+
+  # =============================================================
   # DataHub Core Services
   # =============================================================
 
@@ -191,6 +243,12 @@ services:
         condition: service_healthy
       schema-registry:
         condition: service_healthy
+      datahub-mysql-setup:
+        condition: service_completed_successfully
+      datahub-elasticsearch-setup:
+        condition: service_completed_successfully
+      datahub-kafka-setup:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "curl", "-f", "-m", "30", "http://localhost:8080/health"]
       interval: 20s
