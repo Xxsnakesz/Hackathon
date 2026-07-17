@@ -484,8 +484,15 @@ class PostgresSchemaInspector:
 
         # --- Live DB: ALTER TABLE ---
         # Postgres refuses to alter a column that is referenced by a view.
-        # Capture dependent views, drop them, ALTER, then recreate — all in one transaction.
+        # Approach: drop dependent views + ALTER in one transaction; commit;
+        # then try to recreate views in a separate transaction. If a view
+        # can't be rebuilt (e.g. a numeric expression on a now-VARCHAR
+        # column), we cache its definition so restore can rebuild it once
+        # the column type is put back.
         safe_type = new_pg_type.upper().replace(";", "").replace("--", "")
+        # Ensure the cache dict exists (persist across calls on the same instance)
+        if not hasattr(self, "_dropped_view_defs"):
+            self._dropped_view_defs = {}
         try:
             cur = self._conn.cursor()
 
@@ -507,8 +514,10 @@ class PostgresSchemaInspector:
             )
             dependent_views = cur.fetchall()
 
-            for view_name, _ in dependent_views:
+            for view_name, view_def in dependent_views:
                 cur.execute(f"DROP VIEW {schema_name}.{view_name} CASCADE")
+                # Cache the definition so restore can recreate it later
+                self._dropped_view_defs[view_name] = view_def
                 logger.info(f"  ↪ Dropped dependent view: {view_name}")
 
             cur.execute(
@@ -516,17 +525,32 @@ class PostgresSchemaInspector:
                 f"ALTER COLUMN {column} TYPE {safe_type} "
                 f"USING {column}::text::{safe_type}"
             )
-
-            for view_name, view_def in dependent_views:
-                cur.execute(f"CREATE VIEW {schema_name}.{view_name} AS {view_def}")
-                logger.info(f"  ↪ Recreated view: {view_name}")
-
             self._conn.commit()
             cur.close()
 
+            # Now attempt to recreate the views. Each in its own transaction —
+            # if a view fails (expression no longer compiles), we skip it and
+            # keep the ALTER committed.
+            broken_views: list[str] = []
+            for view_name, view_def in dependent_views:
+                try:
+                    cur = self._conn.cursor()
+                    cur.execute(f"CREATE VIEW {schema_name}.{view_name} AS {view_def}")
+                    self._conn.commit()
+                    cur.close()
+                    logger.info(f"  ↪ Recreated view: {view_name}")
+                except Exception as view_exc:
+                    self._conn.rollback()
+                    broken_views.append(view_name)
+                    logger.warning(
+                        f"  ↪ Could not recreate view {view_name} (kept in cache for restore): {view_exc}"
+                    )
+
             self.log_schema_change_to_db(table, column, old_type, new_pg_type, changed_by, reason, severity)
             msg = f"Altered {table}.{column}: {old_type} → {new_pg_type}"
-            if dependent_views:
+            if broken_views:
+                msg += f" (view(s) unavailable until restored: {', '.join(broken_views)})"
+            elif dependent_views:
                 msg += f" (recreated {len(dependent_views)} dependent view(s))"
             logger.info(f"✅ {msg}")
             return True, msg
@@ -568,9 +592,12 @@ class PostgresSchemaInspector:
         ddl_type = pg_type_ddl_map.get(baseline_type.lower(), baseline_type.upper())
 
         cast_type = ddl_type.lower().replace(" ", "_") if ddl_type.lower() != "double precision" else "double precision"
+        if not hasattr(self, "_dropped_view_defs"):
+            self._dropped_view_defs = {}
         try:
             cur = self._conn.cursor()
 
+            # Views still present in the DB that reference this column
             cur.execute(
                 """
                 SELECT DISTINCT v.viewname, pg_get_viewdef(c.oid, true) AS def
@@ -586,9 +613,9 @@ class PostgresSchemaInspector:
                 """,
                 (schema_name, table, column.lower()),
             )
-            dependent_views = cur.fetchall()
+            live_views = cur.fetchall()
 
-            for view_name, _ in dependent_views:
+            for view_name, _ in live_views:
                 cur.execute(f"DROP VIEW {schema_name}.{view_name} CASCADE")
 
             cur.execute(
@@ -597,15 +624,23 @@ class PostgresSchemaInspector:
                 f"USING {column}::text::{cast_type}"
             )
 
-            for view_name, view_def in dependent_views:
+            # Merge: recreate views that were live plus any cached broken ones
+            to_recreate = {name: defn for name, defn in live_views}
+            to_recreate.update(self._dropped_view_defs)  # cached views take priority
+
+            for view_name, view_def in to_recreate.items():
                 cur.execute(f"CREATE VIEW {schema_name}.{view_name} AS {view_def}")
 
             self._conn.commit()
             cur.close()
             self.mark_change_reverted(table, column)
+
+            # Views are alive again; clear the drop cache
+            self._dropped_view_defs = {}
+
             msg = f"Restored {table}.{column} → {ddl_type}"
-            if dependent_views:
-                msg += f" (recreated {len(dependent_views)} dependent view(s))"
+            if to_recreate:
+                msg += f" (recreated {len(to_recreate)} view(s))"
             logger.info(f"✅ {msg}")
             return True, msg
         except Exception as exc:
