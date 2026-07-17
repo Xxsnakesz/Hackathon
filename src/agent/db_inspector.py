@@ -183,10 +183,44 @@ class PostgresSchemaInspector:
         self._connect()
 
     def monitored_tables(self) -> list[str]:
-        """Effective list of tables to monitor (context-aware)."""
-        if self.pipeline_context is not None:
-            return self.pipeline_context.monitored_table_names or MONITORED_TABLES
-        return MONITORED_TABLES
+        """
+        Effective list of tables to monitor (context-aware).
+        Views are excluded — their schema is derived from base tables and
+        cannot be independently ALTERed. If the underlying base table drifts,
+        the view breaks automatically; monitoring the base table is enough.
+        """
+        candidates = (
+            self.pipeline_context.monitored_table_names
+            if self.pipeline_context is not None else None
+        ) or MONITORED_TABLES
+
+        if not self.is_live():
+            return candidates
+
+        # Filter out views by querying pg_class
+        try:
+            cur = self._conn.cursor()
+            cur.execute(
+                """
+                SELECT c.relname
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = 'public'
+                  AND c.relkind = 'r'      -- ordinary tables only, not views
+                  AND c.relname = ANY(%s)
+                """,
+                (candidates,),
+            )
+            base_tables = {r[0] for r in cur.fetchall()}
+            cur.close()
+            filtered = [t for t in candidates if t in base_tables]
+            skipped = [t for t in candidates if t not in base_tables]
+            if skipped:
+                logger.info(f"Skipping non-base-table entities (views): {skipped}")
+            return filtered or candidates  # fallback if filter matched nothing
+        except Exception as exc:
+            logger.warning(f"Could not filter views out of monitored tables: {exc}")
+            return candidates
 
     def critical_columns_for(self, table_name: str) -> set[str]:
         """Effective set of critical columns for a given table (context-aware)."""
