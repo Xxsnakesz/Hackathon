@@ -1,26 +1,16 @@
 # =============================================================================
 # Requirements for AI Data Reliability Agent
 # =============================================================================
-# Core dependencies for the hackathon project.
 # Install with: pip install -r requirements.txt
 # =============================================================================
 
 # DataHub SDK — For metadata emission and DataHub API communication
 acryl-datahub>=0.14.0
 
-# LLM Integration (optional — for full LLM-powered agent mode)
-# openai>=1.0.0
-# langchain>=0.2.0
-# langchain-openai>=0.1.0
-
 # Data processing
 pandas>=2.0.0
 
-# Web UI for demo (optional)
-# streamlit>=1.30.0
-# gradio>=4.0.0
-
-# PostgreSQL adapter (for direct DB operations)
+# PostgreSQL adapter (for direct DB schema inspection)
 psycopg2-binary>=2.9.0
 
 # Environment variable management
@@ -28,3 +18,9 @@ python-dotenv>=1.0.0
 
 # Utilities
 requests>=2.31.0
+
+# Web UI — Streamlit frontend dashboard
+streamlit>=1.35.0
+
+# Charts and visualization
+plotly>=5.0.0

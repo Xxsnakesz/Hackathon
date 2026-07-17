@@ -360,29 +360,23 @@ def register_feature_dataset(emitter: DatahubRestEmitter) -> str:
 # ===========================================================================
 def register_ml_model(emitter: DatahubRestEmitter) -> str:
     """
-    Register the Fraud_Detection_ML_Model as an MLModel entity in DataHub.
-
-    DataHub has first-class support for ML models as entities. We use the
-    MLModelPropertiesClass to describe the model's type, description,
-    and other metadata.
-
-    Returns:
-        The ML model URN string.
+    Register the Fraud_Detection_ML_Model as a dataset in DataHub.
+    (Modeled as a dataset to natively support upstreamLineage in the UI).
     """
-    # ML model URN format: urn:li:mlModel:(urn:li:dataPlatform:<platform>,<name>,<env>)
-    model_urn = f"urn:li:mlModel:(urn:li:dataPlatform:{PLATFORM},{ML_MODEL_NAME},{ENV})"
+    # Dataset URN format for ML Model
+    model_urn = f"urn:li:dataset:(urn:li:dataPlatform:mlflow,{ML_MODEL_NAME},{ENV})"
 
     print(f"🤖 Registering ML model: {ML_MODEL_NAME}")
     logger.info(f"ML Model URN: {model_urn}")
 
-    # --- MCP 1: ML Model Properties ---
-    # MLModelPropertiesClass holds the model's description, type, and metadata.
+    # --- MCP 1: Dataset Properties ---
     properties_mcp = MetadataChangeProposalWrapper(
         entityUrn=model_urn,
-        aspect=MLModelPropertiesClass(
-            description="Production fraud detection model for PaySim financial transactions",
-            type="XGBoost Classifier",
+        aspect=DatasetPropertiesClass(
+            name=ML_MODEL_NAME,
+            description="Production fraud detection model for PaySim financial transactions (Registered as Dataset for Lineage)",
             customProperties={
+                "type": "XGBoost Classifier",
                 "framework": "XGBoost",
                 "model_version": "2.0",
                 "training_dataset": FEATURE_DATASET_NAME,
@@ -402,7 +396,7 @@ def register_ml_model(emitter: DatahubRestEmitter) -> str:
     for mcp in [properties_mcp, status_mcp]:
         emitter.emit(mcp)
 
-    print(f"  ✅ ML Model registered: type=XGBoost Classifier")
+    print(f"  ✅ ML Model registered as dataset (for lineage support)")
     logger.info(f"Emitted properties and status for {ML_MODEL_NAME}")
 
     return model_urn
@@ -581,12 +575,12 @@ def main():
         "--gms-url",
         type=str,
         default=None,
-        help="DataHub GMS URL (overrides DATAHUB_GMS_URL env var). Default: http://localhost:8080",
+        help="DataHub GMS URL (overrides DATAHUB_GMS_URL env var). Default: http://localhost:8085",
     )
     args = parser.parse_args()
 
     # Determine the GMS URL: CLI arg > env var > default.
-    gms_url = args.gms_url or os.environ.get("DATAHUB_GMS_URL", "http://localhost:8080")
+    gms_url = args.gms_url or os.environ.get("DATAHUB_GMS_URL", "http://localhost:8085")
 
     # --- Print banner ---
     print()

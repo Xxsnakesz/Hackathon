@@ -5,14 +5,14 @@
 --
 -- PROBLEM DETECTED:
 --   Table: public.paysim_raw_transactions
---   Column: amount
+--   Column: isflaggedfraud
 --   Current (Wrong) Type: character varying
---   Expected (Correct) Type: double precision -> DOUBLE PRECISION
+--   Expected (Correct) Type: integer -> INTEGER
 --
 -- ROOT CAUSE:
---   An upstream engineer changed the column type from double precision to character varying,
+--   An upstream engineer changed the column type from integer to character varying,
 --   causing the downstream Fraud Detection ML Model to produce incorrect predictions.
---   The model expects numeric input for the 'amount' feature, but received
+--   The model expects numeric input for the 'isflaggedfraud' feature, but received
 --   string values, leading to massive false positives.
 --
 -- IMPACT:
@@ -35,26 +35,26 @@ BEGIN
     FROM information_schema.columns
     WHERE table_schema = 'public'
       AND table_name = 'paysim_raw_transactions'
-      AND column_name = 'amount';
+      AND column_name = 'isflaggedfraud';
     
     IF current_type IS NULL THEN
-        RAISE EXCEPTION 'Column amount not found in public.paysim_raw_transactions';
+        RAISE EXCEPTION 'Column isflaggedfraud not found in public.paysim_raw_transactions';
     END IF;
     
-    RAISE NOTICE 'Current type of amount: %', current_type;
+    RAISE NOTICE 'Current type of isflaggedfraud: %', current_type;
 END $$;
 
 -- Step 2: Fix the column type back to the correct numeric type
 -- Using CAST to safely convert STRING values back to numeric
 ALTER TABLE public.paysim_raw_transactions
-    ALTER COLUMN amount 
-    TYPE DOUBLE PRECISION 
-    USING amount::double precision;
+    ALTER COLUMN isflaggedfraud 
+    TYPE INTEGER 
+    USING isflaggedfraud::integer;
 
 -- Step 3: Add a comment documenting the fix for future reference
-COMMENT ON COLUMN public.paysim_raw_transactions.amount IS 
+COMMENT ON COLUMN public.paysim_raw_transactions.isflaggedfraud IS 
     'FIXED by AI Data Reliability Agent on 2026-07-17 14:30:09. '
-    'Type restored from character varying to DOUBLE PRECISION. '
+    'Type restored from character varying to INTEGER. '
     'Original incident: schema drift caused Fraud ML Model degradation.';
 
 -- Step 4: Verify the fix was applied correctly
@@ -66,12 +66,12 @@ BEGIN
     FROM information_schema.columns
     WHERE table_schema = 'public'
       AND table_name = 'paysim_raw_transactions'
-      AND column_name = 'amount';
+      AND column_name = 'isflaggedfraud';
     
-    RAISE NOTICE 'Column amount type after fix: %', new_type;
+    RAISE NOTICE 'Column isflaggedfraud type after fix: %', new_type;
     
     -- Verify by running a simple aggregate on the fixed column
-    EXECUTE format('SELECT COUNT(*), AVG(%I) FROM public.paysim_raw_transactions LIMIT 1', 'amount');
+    EXECUTE format('SELECT COUNT(*), AVG(%I) FROM public.paysim_raw_transactions LIMIT 1', 'isflaggedfraud');
     RAISE NOTICE 'Aggregate check passed — column is now numeric and queryable.';
 END $$;
 

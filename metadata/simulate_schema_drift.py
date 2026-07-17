@@ -172,8 +172,16 @@ def _drifted_transaction_fields() -> list:
         # Column 10: isFraud — unchanged (INT → NumberTypeClass)
         _make_field("isFraud",          NumberTypeClass(), "Ground truth fraud label: 1 = fraudulent, 0 = legitimate"),
 
-        # Column 11: isFlaggedFraud — unchanged (INT → NumberTypeClass)
-        _make_field("isFlaggedFraud",   NumberTypeClass(), "Flag set by a simple rule-based engine (large transfers > 200k)"),
+        # ┌─────────────────────────────────────────────────────────────────┐
+        # │  ⚠️  SCHEMA DRIFT HERE!                                        │
+        # │  Column 11: isFlaggedFraud — CHANGED from NumberTypeClass to   │
+        # │  StringTypeClass. Simulates a boolean/string conversion.       │
+        # └─────────────────────────────────────────────────────────────────┘
+        _make_field(
+            "isFlaggedFraud",
+            StringTypeClass(),  # ← WAS NumberTypeClass() — SECOND DRIFT!
+            "Flag set by a simple rule-based engine — ⚠️ TYPE CHANGED FROM INT TO STRING (schema drift!)",
+        ),
     ]
 
 
@@ -206,9 +214,9 @@ def simulate_schema_drift(emitter: DatahubRestEmitter) -> None:
 
     # --- Announce the drift ---
     print()
-    print("⚠️  Simulating schema drift: changing column 'amount' from DOUBLE to STRING")
+    print("⚠️  Simulating schema drift: changing 'amount' & 'isFlaggedFraud' to STRING")
     print()
-    logger.info("Simulating schema drift: changing column amount from DOUBLE to STRING")
+    logger.info("Simulating schema drift: changing amount and isFlaggedFraud to STRING")
 
     # --- Build the drifted schema MCP ---
     # We re-emit the SchemaMetadataClass aspect for the same entity URN.
@@ -239,15 +247,16 @@ def simulate_schema_drift(emitter: DatahubRestEmitter) -> None:
     print("─" * 60)
     print()
     print("🔴 Schema drift simulated!")
-    print("   The 'amount' column type has been changed from DOUBLE to STRING")
-    print("   in DataHub metadata.")
+    print("   The 'amount' and 'isFlaggedFraud' column types have been changed")
+    print("   to STRING in DataHub metadata.")
     print()
     print("─" * 60)
     print()
     print("📋 What happened:")
     print("   • The paysim_raw_transactions schema was re-emitted to DataHub")
     print("   • Column 'amount' type: DOUBLE → STRING")
-    print("   • All other 10 columns remain unchanged")
+    print("   • Column 'isFlaggedFraud' type: INT → STRING")
+    print("   • All other 9 columns remain unchanged")
     print()
     print("💥 Downstream impact (simulated scenario):")
     print("   • feature_engineering_table — amount_ratio computation will FAIL")
@@ -287,12 +296,12 @@ def main():
         "--gms-url",
         type=str,
         default=None,
-        help="DataHub GMS URL (overrides DATAHUB_GMS_URL env var). Default: http://localhost:8080",
+        help="DataHub GMS URL (overrides DATAHUB_GMS_URL env var). Default: http://localhost:8085",
     )
     args = parser.parse_args()
 
     # Determine GMS URL: CLI arg takes priority > env var > default.
-    gms_url = args.gms_url or os.environ.get("DATAHUB_GMS_URL", "http://localhost:8080")
+    gms_url = args.gms_url or os.environ.get("DATAHUB_GMS_URL", "http://localhost:8085")
 
     # --- Print banner ---
     print()
@@ -301,7 +310,7 @@ def main():
     print("=" * 60)
     print(f"📡 GMS URL : {gms_url}")
     print(f"📊 Dataset : {RAW_DATASET_NAME}")
-    print(f"🔄 Change  : column 'amount' DOUBLE → STRING")
+    print(f"🔄 Change  : 'amount' & 'isFlaggedFraud' to STRING")
     print("=" * 60)
 
     # --- Initialize the DataHub REST emitter ---

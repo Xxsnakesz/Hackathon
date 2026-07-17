@@ -1,0 +1,38 @@
+{
+  "_meta": {
+    "description": "Baseline (healthy) schema for monitored tables. The DB inspector compares actual DB schema against this file to detect schema drift.",
+    "created_at": "2026-07-17",
+    "version": 1
+  },
+  "paysim_raw_transactions": [
+    {"column": "step",           "type": "integer",          "nullable": false},
+    {"column": "type",           "type": "character varying", "nullable": false},
+    {"column": "amount",         "type": "double precision",  "nullable": false},
+    {"column": "nameorig",       "type": "character varying", "nullable": false},
+    {"column": "oldbalanceorg",  "type": "double precision",  "nullable": false},
+    {"column": "newbalanceorig", "type": "double precision",  "nullable": false},
+    {"column": "namedest",       "type": "character varying", "nullable": false},
+    {"column": "oldbalancedest", "type": "double precision",  "nullable": false},
+    {"column": "newbalancedest", "type": "double precision",  "nullable": false},
+    {"column": "isfraud",        "type": "integer",          "nullable": false},
+    {"column": "isflaggedfraud", "type": "integer",          "nullable": false}
+  ],
+  "feature_engineering_table": [
+    {"column": "step",               "type": "integer",          "nullable": true},
+    {"column": "type",               "type": "character varying", "nullable": true},
+    {"column": "amount",             "type": "double precision",  "nullable": true},
+    {"column": "nameorig",           "type": "character varying", "nullable": true},
+    {"column": "oldbalanceorg",      "type": "double precision",  "nullable": true},
+    {"column": "newbalanceorig",     "type": "double precision",  "nullable": true},
+    {"column": "namedest",           "type": "character varying", "nullable": true},
+    {"column": "oldbalancedest",     "type": "double precision",  "nullable": true},
+    {"column": "newbalancedest",     "type": "double precision",  "nullable": true},
+    {"column": "isfraud",            "type": "integer",          "nullable": true},
+    {"column": "isflaggedfraud",     "type": "integer",          "nullable": true},
+    {"column": "amount_ratio",       "type": "double precision",  "nullable": true},
+    {"column": "balance_change_orig","type": "double precision",  "nullable": true},
+    {"column": "balance_change_dest","type": "double precision",  "nullable": true},
+    {"column": "is_large_transaction","type": "integer",         "nullable": true},
+    {"column": "is_balance_mismatch","type": "integer",          "nullable": true}
+  ]
+}
