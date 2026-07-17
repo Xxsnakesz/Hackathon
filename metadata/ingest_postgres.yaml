@@ -1,0 +1,81 @@
+# ============================================================
+# ingest_postgres.yaml — DataHub PostgreSQL Ingestion Config
+# ============================================================
+# Runs the DataHub PostgreSQL source connector to auto-ingest
+# schema metadata from the paysim_fintech database.
+#
+# Usage:
+#   datahub ingest -c metadata/ingest_postgres.yaml
+#
+# Requirements:
+#   pip install 'acryl-datahub[postgres]'
+# ============================================================
+
+source:
+  type: postgres
+  config:
+    # Connection — matches docker-compose.yml (host port 5433)
+    host_port: "localhost:5433"
+    database: "${POSTGRES_DB:-paysim_fintech}"
+    username: "${POSTGRES_USER:-paysim_user}"
+    password: "${POSTGRES_PASSWORD:-paysim_secret_2026}"
+
+    # Only ingest the tables we monitor
+    schema_pattern:
+      allow:
+        - "^public$"
+    table_pattern:
+      allow:
+        - "^public\\.paysim_raw_transactions$"
+        - "^public\\.feature_engineering_table$"
+        - "^public\\.schema_change_log$"
+        - "^public\\.schema_baseline$"
+        - "^public\\.transaction_health_summary$"
+
+    # Enable profiling for column statistics
+    profiling:
+      enabled: true
+      profile_table_level_only: false
+      include_field_null_count: true
+      include_field_min_value: true
+      include_field_max_value: true
+      include_field_mean_value: true
+      include_field_stddev_value: true
+      include_field_quantiles: true
+      include_field_distinct_count: true
+      include_field_sample_values: false  # Disabled for PII compliance
+
+    # Classify columns for better DataHub UI experience
+    column_type_overrides:
+      - column: "amount"
+        classification: "FINANCIAL_METRIC"
+      - column: "isfraud"
+        classification: "ML_TARGET_LABEL"
+      - column: "nameOrig"
+        classification: "PII"
+      - column: "nameDest"
+        classification: "PII"
+
+    # Stateful ingestion — track changes between runs
+    stateful_ingestion:
+      enabled: true
+      state_provider:
+        type: datahub
+        config:
+          datahub_api:
+            server: "${DATAHUB_GMS_URL:-http://localhost:8085}"
+
+sink:
+  type: datahub-rest
+  config:
+    server: "${DATAHUB_GMS_URL:-http://localhost:8085}"
+    # Retry failed emits
+    max_retries: 3
+    retry_status_codes:
+      - 429
+      - 500
+      - 502
+      - 503
+
+# Pipeline metadata
+pipeline_name: "paysim-postgres-ingestion"

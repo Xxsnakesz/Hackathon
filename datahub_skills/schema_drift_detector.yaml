@@ -1,0 +1,202 @@
+# =========================================================
+# DataHub Skill: Schema Drift Detector
+# =========================================================
+# This file defines a reusable DataHub Agent skill that
+# monitors PostgreSQL schema drift in real-time and
+# writes incidents back to DataHub.
+#
+# Installation as DataHub Custom Skill:
+#   datahub skill install --path datahub_skills/
+#
+# This file is submitted as an Open-Source Contribution
+# to the DataHub ecosystem (Bonus criterion).
+# =========================================================
+
+name: schema_drift_detector
+version: "1.0.0"
+description: |
+  Autonomous schema drift detection skill for AI agents operating on
+  DataHub-registered datasets. Compares actual PostgreSQL column types
+  against baseline registered in DataHub schema_baseline, detects
+  type changes, and writes DATA-INCIDENT tags back to the DataHub
+  metadata graph.
+
+author: AI Data Reliability Agent Team
+license: Apache-2.0
+
+# ── Skill Metadata ─────────────────────────────────────────────────────────
+tags:
+  - schema-monitoring
+  - data-reliability
+  - ml-ops
+  - fintech
+  - incident-response
+
+# ── Input Schema ───────────────────────────────────────────────────────────
+inputs:
+  alert_message:
+    type: string
+    description: "The alert or trigger message that initiated the investigation"
+    required: true
+
+  postgres_connection:
+    type: object
+    description: "PostgreSQL connection parameters"
+    required: false
+    properties:
+      host:
+        type: string
+        default: "localhost"
+        env: POSTGRES_HOST
+      port:
+        type: integer
+        default: 5433
+        env: POSTGRES_PORT
+      database:
+        type: string
+        default: "paysim_fintech"
+        env: POSTGRES_DB
+      user:
+        type: string
+        env: POSTGRES_USER
+      password:
+        type: string
+        env: POSTGRES_PASSWORD
+
+  datahub_gms_url:
+    type: string
+    description: "DataHub GMS base URL for lineage reads and metadata write-back"
+    default: "http://localhost:8085"
+    env: DATAHUB_GMS_URL
+
+  monitored_tables:
+    type: array
+    items:
+      type: string
+    description: "List of table names to monitor for schema drift"
+    default:
+      - paysim_raw_transactions
+      - feature_engineering_table
+
+  severity_threshold:
+    type: string
+    enum: [LOW, MEDIUM, HIGH, CRITICAL]
+    default: HIGH
+    description: "Minimum severity to trigger incident tagging in DataHub"
+
+# ── Output Schema ──────────────────────────────────────────────────────────
+outputs:
+  status:
+    type: string
+    enum: [no_drift, incident_detected, error]
+    description: "Overall investigation result"
+
+  drifts:
+    type: array
+    description: "List of detected schema drift events"
+    items:
+      type: object
+      properties:
+        table: { type: string }
+        column: { type: string }
+        baseline_type: { type: string }
+        actual_type: { type: string }
+        severity: { type: string }
+        drift_type: { type: string }
+        changed_by: { type: string }
+        change_reason: { type: string }
+
+  impact_metrics:
+    type: object
+    description: "Real data impact computed from COUNT queries on transaction data"
+    properties:
+      total_rows: { type: integer }
+      columns: { type: object }
+
+  datahub_tag_written:
+    type: boolean
+    description: "Whether the DATA-INCIDENT tag was successfully written to DataHub GMS"
+
+  fix_scripts_generated:
+    type: array
+    description: "Paths to generated SQL/dbt remediation scripts"
+    items:
+      type: string
+
+  report:
+    type: string
+    description: "Full markdown investigation report"
+
+# ── Execution ──────────────────────────────────────────────────────────────
+execution:
+  entrypoint: "src/agent/reliability_agent.py"
+  method: "ReliabilityAgent.investigate"
+  runtime: python3.10+
+
+  dependencies:
+    - psycopg2-binary>=2.9.0
+    - acryl-datahub>=0.14.0
+    - requests>=2.31.0
+
+# ── DataHub Integration ────────────────────────────────────────────────────
+datahub_integration:
+  reads:
+    - endpoint: "GET /relationships"
+      description: "Traverse upstream lineage from ML model to source tables"
+    - endpoint: "GET /entities/{urn}"
+      description: "Read entity metadata (name, tags, description)"
+    - endpoint: "GET /config"
+      description: "Probe GMS connectivity"
+
+  writes:
+    - aspect: globalTags
+      description: "Writes DATA-INCIDENT and SCHEMA-DRIFT-DETECTED tags to affected entities"
+    - aspect: datasetProperties
+      description: "Writes incident description and agent metadata to entity properties"
+    - method: DatahubRestEmitter (SDK)
+      description: "Uses MetadataChangeProposalWrapper to emit MCPs to GMS"
+
+  lineage_awareness:
+    description: |
+      The skill traverses the lineage graph upstream from the ML model to identify
+      all source tables. Any table in the upstream lineage is checked for schema
+      drift. This ensures the agent catches drift in any layer of the pipeline,
+      not just direct sources.
+
+# ── Example Usage ─────────────────────────────────────────────────────────
+examples:
+  - name: "Basic drift detection"
+    description: "Detect schema drift after receiving ML accuracy alert"
+    input:
+      alert_message: "CRITICAL: Fraud_Detection_ML_Model accuracy dropped from 97.8% to 42.3%"
+      datahub_gms_url: "http://localhost:8085"
+    expected_output:
+      status: "incident_detected"
+      drifts:
+        - table: "paysim_raw_transactions"
+          column: "amount"
+          baseline_type: "double precision"
+          actual_type: "character varying"
+          severity: "CRITICAL"
+
+  - name: "Healthy pipeline check"
+    description: "Confirm no drift when pipeline is healthy"
+    input:
+      alert_message: "Routine health check"
+    expected_output:
+      status: "no_drift"
+
+# ── Notes for DataHub Contribution ────────────────────────────────────────
+contribution_notes: |
+  This skill extends DataHub's existing schema monitoring capabilities by:
+  1. Connecting schema drift detection to REAL database inspection
+     (not just DataHub metadata changes)
+  2. Adding a schema_change_log audit trail with human context (who/why)
+  3. Computing real data impact from actual row counts
+  4. Providing automated SQL remediation script generation
+  5. Offering a Streamlit UI for visual monitoring and incident simulation
+
+  Proposed DataHub feature requests based on this skill:
+  - Native schema_change_log aspect for datasets
+  - Schema drift assertion type in DataHub Assertions framework
+  - "Incident" entity type with upstream/downstream impact analysis

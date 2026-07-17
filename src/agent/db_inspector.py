@@ -1,78 +1,145 @@
 # =============================================================================
-# db_inspector.py — Real PostgreSQL Schema Inspector
+# db_inspector.py — Real PostgreSQL Schema Inspector (v2 — Full Real)
 # =============================================================================
-# This module connects to PostgreSQL and reads the ACTUAL column types from
-# information_schema.columns. This is how the agent detects REAL schema drift
-# instead of relying on hardcoded metadata.
+# Connects to PostgreSQL and reads:
+#   1. Actual column types from information_schema.columns
+#   2. Schema change history from schema_change_log table
+#   3. Baseline schema from schema_baseline table
+#   4. Impact metrics computed from real data (COUNT, NULL %, cast failures)
 #
-# Fallback: if PostgreSQL is unreachable, it switches to simulation mode
-# where a mutable in-memory state can be drifted interactively (for demo
-# without Docker).
+# Falls back to full in-memory simulation if PostgreSQL is not reachable.
+# Simulation mode is stateful and mutable — drifts/resets persist in-session.
 # =============================================================================
 
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger("DBInspector")
 
-# Path to the baseline schema JSON file
-BASELINE_PATH = Path(__file__).parent / "schema_baseline.json"
-
 # Tables the agent monitors
 MONITORED_TABLES = ["paysim_raw_transactions", "feature_engineering_table"]
 
+# Path to the baseline JSON (used in simulation mode only)
+BASELINE_PATH = Path(__file__).parent / "schema_baseline.json"
+
+# Drift severity classification by column
+CRITICAL_COLUMNS = {
+    "amount", "oldbalanceorg", "newbalanceorig",
+    "oldbalancedest", "newbalancedest", "isfraud", "isflaggedfraud",
+}
+
+# Preset drift scenarios metadata (for UI rendering)
+DRIFT_SCENARIOS = {
+    "A": {
+        "name": "ETL Refactor Gone Wrong",
+        "description": "Engineer changes `amount` to VARCHAR during ETL pipeline refactor",
+        "emoji": "💣",
+        "impact": "ALL numeric ML features break — amount_ratio, is_large_transaction",
+        "changed_by_default": "bambang_engineer",
+        "reason_default": "ETL pipeline refactor — column type changed unintentionally during migration",
+        "drifts": [
+            {"table": "paysim_raw_transactions", "column": "amount", "new_type": "character varying"}
+        ],
+    },
+    "B": {
+        "name": "Fraud Label Corruption",
+        "description": "Data pipeline outputs isFraud as string 'true'/'false' instead of 0/1",
+        "emoji": "☣️",
+        "impact": "ML model target label becomes string — model cannot be trained or scored",
+        "changed_by_default": "data_pipeline_v3",
+        "reason_default": "CSV ingestion pipeline v3 updated — writes fraud label as string instead of integer",
+        "drifts": [
+            {"table": "paysim_raw_transactions", "column": "isfraud", "new_type": "character varying"}
+        ],
+    },
+    "C": {
+        "name": "Balance Column Downgrade",
+        "description": "DBA converts balance columns to TEXT for 'storage optimization'",
+        "emoji": "📉",
+        "impact": "balance_change_orig and balance_change_dest features break",
+        "changed_by_default": "dba_team",
+        "reason_default": "Storage optimization initiative — converting numeric balance columns to text",
+        "drifts": [
+            {"table": "paysim_raw_transactions", "column": "oldbalanceorg", "new_type": "character varying"},
+            {"table": "paysim_raw_transactions", "column": "newbalanceorig", "new_type": "character varying"},
+        ],
+    },
+}
+
 
 # =============================================================================
-# Simulation State (used when PostgreSQL is not available)
+# Simulation State
 # =============================================================================
-# This is a mutable copy of the baseline that can be modified at runtime to
-# simulate drift without touching a real database.
 
-def _load_baseline() -> dict:
-    """Load the baseline schema from the JSON file."""
+def _load_baseline_json() -> dict:
+    """Load the baseline schema from the JSON file (for simulation mode)."""
     with open(BASELINE_PATH, "r") as f:
         data = json.load(f)
-    # Strip meta key
     return {k: v for k, v in data.items() if not k.startswith("_")}
 
 
-# Global simulation state — starts as a clean copy of baseline
-_SIM_STATE: dict = {}
+_SIM_SCHEMA_STATE: dict = {}     # Mutable schema state
+_SIM_CHANGE_LOG: list  = []      # In-memory audit trail
 
 
-def _get_sim_state() -> dict:
-    """Return (and lazily initialize) the simulation state."""
-    global _SIM_STATE
-    if not _SIM_STATE:
-        _SIM_STATE = _load_baseline()
-    return _SIM_STATE
+def _get_sim_schema() -> dict:
+    global _SIM_SCHEMA_STATE
+    if not _SIM_SCHEMA_STATE:
+        _SIM_SCHEMA_STATE = _load_baseline_json()
+    return _SIM_SCHEMA_STATE
 
 
 def reset_sim_state():
-    """Reset simulation state back to baseline (undo all simulated drifts)."""
-    global _SIM_STATE
-    _SIM_STATE = _load_baseline()
+    """Reset simulation state to baseline and log the reset."""
+    global _SIM_SCHEMA_STATE, _SIM_CHANGE_LOG
+    _SIM_SCHEMA_STATE = _load_baseline_json()
+    # Mark all active drifts in log as reverted
+    for entry in _SIM_CHANGE_LOG:
+        if not entry.get("is_reverted") and entry.get("severity") != "INFO":
+            entry["is_reverted"] = True
+            entry["reverted_at"] = datetime.now(timezone.utc).isoformat()
+            entry["notes"] = "Reverted via Reset to Baseline"
+    logger.info("[SIM] All columns reset to baseline.")
 
 
-def apply_sim_drift(table: str, column: str, new_type: str):
-    """
-    Apply a simulated schema drift to the in-memory state.
-    Call this to fake an engineer changing a column type.
-    """
-    state = _get_sim_state()
+def apply_sim_drift(table: str, column: str, new_type: str,
+                    changed_by: str = "unknown", reason: str = "No reason provided",
+                    severity: str = "HIGH"):
+    """Apply a simulated schema drift to the in-memory state and log it."""
+    state = _get_sim_schema()
     if table not in state:
-        raise ValueError(f"Table '{table}' not found in simulation state")
+        raise ValueError(f"Table '{table}' not in simulation state")
     for field in state[table]:
         if field["column"].lower() == column.lower():
-            field["_original_type"] = field["type"]
-            field["type"] = new_type
-            logger.info(f"[SIM] Drifted {table}.{column}: {field['_original_type']} → {new_type}")
+            old_type = field["type"]
+            field["_original_type"] = old_type
+            field["type"] = new_type.lower()
+            entry = {
+                "id": len(_SIM_CHANGE_LOG) + 1,
+                "table_name": table,
+                "column_name": column.lower(),
+                "old_type": old_type,
+                "new_type": new_type.lower(),
+                "changed_by": changed_by,
+                "change_reason": reason,
+                "changed_at": datetime.now(timezone.utc).isoformat(),
+                "reverted_at": None,
+                "is_reverted": False,
+                "severity": severity,
+                "notes": None,
+            }
+            _SIM_CHANGE_LOG.append(entry)
+            logger.info(f"[SIM] Drift: {table}.{column} {old_type} → {new_type}")
             return
     raise ValueError(f"Column '{column}' not found in table '{table}'")
+
+
+def get_sim_change_log() -> list:
+    return list(_SIM_CHANGE_LOG)
 
 
 # =============================================================================
@@ -81,51 +148,48 @@ def apply_sim_drift(table: str, column: str, new_type: str):
 
 class PostgresSchemaInspector:
     """
-    Inspects the ACTUAL schema of PostgreSQL tables by querying
-    information_schema.columns.
-
-    Falls back to simulation mode if the database is not reachable.
+    Inspects actual PostgreSQL schema and reads the schema_change_log.
+    Falls back to mutable simulation if DB is not reachable.
     """
 
     def __init__(
         self,
-        host: str = None,
-        port: int = None,
-        database: str = None,
-        user: str = None,
-        password: str = None,
+        host: str = None, port: int = None,
+        database: str = None, user: str = None, password: str = None,
     ):
-        self.host = host or os.environ.get("POSTGRES_HOST", "localhost")
-        self.port = int(port or os.environ.get("POSTGRES_PORT", "5432"))
+        # Try loading .env if available
+        try:
+            from dotenv import load_dotenv
+            load_dotenv()
+        except ImportError:
+            pass
+
+        # Note: docker-compose maps host:5433 → container:5432
+        self.host     = host     or os.environ.get("POSTGRES_HOST", "localhost")
+        self.port     = int(port or os.environ.get("POSTGRES_PORT", "5433"))
         self.database = database or os.environ.get("POSTGRES_DB", "paysim_fintech")
-        self.user = user or os.environ.get("POSTGRES_USER", "paysim_user")
+        self.user     = user     or os.environ.get("POSTGRES_USER", "paysim_user")
         self.password = password or os.environ.get("POSTGRES_PASSWORD", "paysim_secret_2026")
 
         self._conn = None
-        self._mode: str = "unknown"  # "live" or "simulation"
+        self._mode: str = "unknown"
         self._connect()
 
     def _connect(self):
-        """Attempt to connect to PostgreSQL. Switch to simulation on failure."""
         try:
             import psycopg2
             self._conn = psycopg2.connect(
-                host=self.host,
-                port=self.port,
-                database=self.database,
-                user=self.user,
-                password=self.password,
-                connect_timeout=5,
+                host=self.host, port=self.port,
+                database=self.database, user=self.user,
+                password=self.password, connect_timeout=5,
             )
+            self._conn.autocommit = False
             self._mode = "live"
             logger.info(f"✅ Connected to PostgreSQL at {self.host}:{self.port}/{self.database}")
         except Exception as exc:
             self._conn = None
             self._mode = "simulation"
-            logger.warning(
-                f"⚠️  Cannot connect to PostgreSQL ({exc}). "
-                "Switching to SIMULATION mode."
-            )
+            logger.warning(f"⚠️  PostgreSQL unreachable ({exc}). Switching to SIMULATION mode.")
 
     def is_live(self) -> bool:
         return self._mode == "live"
@@ -133,26 +197,17 @@ class PostgresSchemaInspector:
     def mode(self) -> str:
         return self._mode
 
+    # ─────────────────────────────────────────────
+    # Schema Inspection
+    # ─────────────────────────────────────────────
+
     def get_schema(self, table_name: str, schema_name: str = "public") -> list[dict]:
-        """
-        Return the actual column schema for a table.
-
-        Each item in the returned list:
-            {
-                "column":   str,   # lowercase column name
-                "type":     str,   # PostgreSQL data type string
-                "nullable": bool,
-            }
-
-        In simulation mode, reads from the mutable in-memory state.
-        """
+        """Return actual column list: [{column, type, nullable}]"""
         if self.is_live():
             return self._live_schema(table_name, schema_name)
-        else:
-            return self._sim_schema(table_name)
+        return self._sim_schema(table_name)
 
     def _live_schema(self, table_name: str, schema_name: str) -> list[dict]:
-        """Query information_schema.columns for the real table schema."""
         try:
             cur = self._conn.cursor()
             cur.execute(
@@ -167,122 +222,481 @@ class PostgresSchemaInspector:
             rows = cur.fetchall()
             cur.close()
             return [
-                {
-                    "column": row[0].lower(),
-                    "type": row[1].lower(),
-                    "nullable": row[2].upper() == "YES",
-                }
-                for row in rows
+                {"column": r[0].lower(), "type": r[1].lower(), "nullable": r[2].upper() == "YES"}
+                for r in rows
             ]
         except Exception as exc:
-            logger.error(f"Error querying schema for {table_name}: {exc}")
-            # Reconnect attempt
+            logger.error(f"Error reading schema for {table_name}: {exc}")
             self._connect()
             return []
 
     def _sim_schema(self, table_name: str) -> list[dict]:
-        """Return schema from the mutable simulation state."""
-        state = _get_sim_state()
-        table_data = state.get(table_name, [])
+        state = _get_sim_schema()
         return [
-            {
-                "column": f["column"].lower(),
-                "type": f["type"].lower(),
-                "nullable": f.get("nullable", True),
-            }
-            for f in table_data
+            {"column": f["column"].lower(), "type": f["type"].lower(),
+             "nullable": f.get("nullable", True)}
+            for f in state.get(table_name, [])
         ]
 
-    def apply_drift_to_db(
-        self, table_name: str, column_name: str, new_pg_type: str, schema_name: str = "public"
-    ) -> bool:
-        """
-        Execute an ALTER TABLE to change a column type in the real database.
-        Returns True on success, False on failure.
+    def get_all_monitored_schemas(self) -> dict:
+        return {t: self.get_schema(t) for t in MONITORED_TABLES}
 
-        USING clause attempts a safe cast; may fail if data is incompatible.
+    # ─────────────────────────────────────────────
+    # Baseline from DB
+    # ─────────────────────────────────────────────
+
+    def get_baseline_from_db(self, table_name: str) -> list[dict]:
+        """Read baseline from schema_baseline table (live DB only)."""
+        if not self.is_live():
+            return _load_baseline_json().get(table_name, [])
+        try:
+            cur = self._conn.cursor()
+            cur.execute(
+                """
+                SELECT column_name, expected_type, is_nullable, is_critical, description
+                FROM schema_baseline
+                WHERE table_name = %s
+                ORDER BY id
+                """,
+                (table_name,),
+            )
+            rows = cur.fetchall()
+            cur.close()
+            return [
+                {
+                    "column": r[0], "type": r[1],
+                    "nullable": r[2], "is_critical": r[3],
+                    "description": r[4],
+                }
+                for r in rows
+            ]
+        except Exception as exc:
+            logger.warning(f"Cannot read schema_baseline from DB: {exc}. Using JSON fallback.")
+            return _load_baseline_json().get(table_name, [])
+
+    # ─────────────────────────────────────────────
+    # Schema Change Log
+    # ─────────────────────────────────────────────
+
+    def get_schema_change_log(self, table_name: str = None, limit: int = 100) -> list[dict]:
+        """
+        Read schema change history from schema_change_log table (or sim log).
+        If table_name is None, returns entries for all tables.
         """
         if not self.is_live():
-            logger.info(f"[SIM] Applying simulated drift: {table_name}.{column_name} → {new_pg_type}")
-            apply_sim_drift(table_name, column_name, new_pg_type)
-            return True
+            logs = get_sim_change_log()
+            if table_name:
+                logs = [l for l in logs if l["table_name"] == table_name]
+            return logs[-limit:]
 
+        try:
+            cur = self._conn.cursor()
+            if table_name:
+                cur.execute(
+                    """
+                    SELECT id, table_name, column_name, old_type, new_type,
+                           changed_by, change_reason, changed_at,
+                           reverted_at, is_reverted, severity, notes
+                    FROM schema_change_log
+                    WHERE table_name = %s
+                    ORDER BY changed_at DESC
+                    LIMIT %s
+                    """,
+                    (table_name, limit),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT id, table_name, column_name, old_type, new_type,
+                           changed_by, change_reason, changed_at,
+                           reverted_at, is_reverted, severity, notes
+                    FROM schema_change_log
+                    ORDER BY changed_at DESC
+                    LIMIT %s
+                    """,
+                    (limit,),
+                )
+            rows = cur.fetchall()
+            cur.close()
+            cols = ["id", "table_name", "column_name", "old_type", "new_type",
+                    "changed_by", "change_reason", "changed_at",
+                    "reverted_at", "is_reverted", "severity", "notes"]
+            return [dict(zip(cols, r)) for r in rows]
+        except Exception as exc:
+            logger.warning(f"Cannot read schema_change_log: {exc}")
+            return []
+
+    def log_schema_change_to_db(
+        self, table: str, column: str, old_type: str, new_type: str,
+        changed_by: str, reason: str, severity: str = "HIGH",
+    ) -> bool:
+        """Write a schema change event to schema_change_log."""
+        if not self.is_live():
+            apply_sim_drift(table, column, new_type, changed_by, reason, severity)
+            return True
+        try:
+            cur = self._conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO schema_change_log
+                    (table_name, column_name, old_type, new_type, changed_by, change_reason, severity)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (table, column.lower(), old_type, new_type, changed_by, reason, severity),
+            )
+            self._conn.commit()
+            cur.close()
+            return True
+        except Exception as exc:
+            self._conn.rollback()
+            logger.error(f"Failed to log schema change: {exc}")
+            return False
+
+    def mark_change_reverted(self, table: str, column: str) -> bool:
+        """Mark all active drift entries for a column as reverted."""
+        if not self.is_live():
+            for entry in _SIM_CHANGE_LOG:
+                if (entry["table_name"] == table and
+                        entry["column_name"] == column.lower() and
+                        not entry["is_reverted"]):
+                    entry["is_reverted"] = True
+                    entry["reverted_at"] = datetime.now(timezone.utc).isoformat()
+            return True
+        try:
+            cur = self._conn.cursor()
+            cur.execute(
+                """
+                UPDATE schema_change_log
+                SET is_reverted = TRUE, reverted_at = NOW(), notes = 'Reverted via AI Agent / UI'
+                WHERE table_name = %s AND column_name = %s AND is_reverted = FALSE
+                """,
+                (table, column.lower()),
+            )
+            self._conn.commit()
+            cur.close()
+            return True
+        except Exception as exc:
+            self._conn.rollback()
+            logger.error(f"Failed to mark revert: {exc}")
+            return False
+
+    # ─────────────────────────────────────────────
+    # Apply / Revert Drift
+    # ─────────────────────────────────────────────
+
+    def apply_drift_to_db(
+        self, table: str, column: str, new_pg_type: str,
+        changed_by: str = "unknown", reason: str = "No reason provided",
+        severity: str = "HIGH", schema_name: str = "public",
+    ) -> tuple[bool, str]:
+        """
+        ALTER TABLE to change a column type.
+        Returns (success, message).
+        Also records the change in schema_change_log.
+        """
+        # Get current type before altering
+        current_schema = self.get_schema(table, schema_name)
+        current_field = next(
+            (f for f in current_schema if f["column"].lower() == column.lower()), None
+        )
+        old_type = current_field["type"] if current_field else "unknown"
+
+        if not self.is_live():
+            apply_sim_drift(table, column, new_pg_type, changed_by, reason, severity)
+            msg = f"[SIM] {table}.{column}: {old_type} → {new_pg_type}"
+            logger.info(msg)
+            return True, msg
+
+        # --- Live DB: ALTER TABLE ---
+        safe_type = new_pg_type.upper().replace(";", "").replace("--", "")
         sql = f"""
-            ALTER TABLE {schema_name}.{table_name}
-            ALTER COLUMN {column_name}
-            TYPE {new_pg_type}
-            USING {column_name}::text::{new_pg_type};
+            ALTER TABLE {schema_name}.{table}
+            ALTER COLUMN {column}
+            TYPE {safe_type}
+            USING {column}::text::{safe_type};
         """
         try:
             cur = self._conn.cursor()
             cur.execute(sql)
             self._conn.commit()
             cur.close()
-            logger.info(f"✅ Altered {table_name}.{column_name} → {new_pg_type} in live DB")
-            return True
+            # Log to audit table
+            self.log_schema_change_to_db(table, column, old_type, new_pg_type, changed_by, reason, severity)
+            msg = f"Altered {table}.{column}: {old_type} → {new_pg_type}"
+            logger.info(f"✅ {msg}")
+            return True, msg
         except Exception as exc:
             self._conn.rollback()
-            logger.error(f"❌ Failed to alter {table_name}.{column_name}: {exc}")
-            return False
+            msg = f"Failed: {exc}"
+            logger.error(f"❌ {msg}")
+            return False, msg
 
     def restore_column_to_baseline(
-        self, table_name: str, column_name: str, schema_name: str = "public"
-    ) -> bool:
-        """
-        Restore a drifted column back to its baseline type.
-        Looks up the correct type from schema_baseline.json.
-        """
-        baseline = _load_baseline()
-        table_baseline = baseline.get(table_name, [])
-        target_field = next(
-            (f for f in table_baseline if f["column"].lower() == column_name.lower()), None
-        )
-        if not target_field:
-            logger.error(f"Column '{column_name}' not in baseline for table '{table_name}'")
-            return False
+        self, table: str, column: str, schema_name: str = "public"
+    ) -> tuple[bool, str]:
+        """Restore a column to its baseline type."""
+        baseline = self.get_baseline_from_db(table)
+        target = next((f for f in baseline if f["column"].lower() == column.lower()), None)
+        if not target:
+            return False, f"Column '{column}' not in baseline for table '{table}'"
 
-        baseline_type = target_field["type"]
+        baseline_type = target["type"]
 
         if not self.is_live():
-            reset_sim_state()
-            logger.info(f"[SIM] Simulation state fully reset to baseline.")
-            return True
+            state = _get_sim_schema()
+            for field in state.get(table, []):
+                if field["column"].lower() == column.lower():
+                    field["type"] = baseline_type
+            self.mark_change_reverted(table, column)
+            return True, f"[SIM] {table}.{column} restored to {baseline_type}"
 
-        # Convert baseline type to valid PostgreSQL DDL type
-        pg_type_map = {
-            "integer": "INTEGER",
-            "double precision": "DOUBLE PRECISION",
+        # Convert baseline type string to valid DDL type
+        pg_type_ddl_map = {
+            "integer":           "INTEGER",
+            "double precision":  "DOUBLE PRECISION",
             "character varying": "VARCHAR",
-            "text": "TEXT",
-            "boolean": "BOOLEAN",
-            "bigint": "BIGINT",
+            "varchar":           "VARCHAR",
+            "text":              "TEXT",
+            "boolean":           "BOOLEAN",
+            "bigint":            "BIGINT",
         }
-        pg_type = pg_type_map.get(baseline_type, baseline_type.upper())
+        ddl_type = pg_type_ddl_map.get(baseline_type.lower(), baseline_type.upper())
 
         sql = f"""
-            ALTER TABLE {schema_name}.{table_name}
-            ALTER COLUMN {column_name}
-            TYPE {pg_type}
-            USING {column_name}::text::{pg_type.lower().replace(' ', '_')};
+            ALTER TABLE {schema_name}.{table}
+            ALTER COLUMN {column}
+            TYPE {ddl_type}
+            USING {column}::text::{ddl_type.lower().replace(' ', '_')};
         """
         try:
             cur = self._conn.cursor()
             cur.execute(sql)
             self._conn.commit()
             cur.close()
-            logger.info(f"✅ Restored {table_name}.{column_name} → {pg_type}")
-            return True
+            self.mark_change_reverted(table, column)
+            msg = f"Restored {table}.{column} → {ddl_type}"
+            logger.info(f"✅ {msg}")
+            return True, msg
         except Exception as exc:
             self._conn.rollback()
-            logger.error(f"❌ Failed to restore {table_name}.{column_name}: {exc}")
-            return False
+            msg = f"Failed to restore {table}.{column}: {exc}"
+            logger.error(f"❌ {msg}")
+            return False, msg
 
-    def get_all_monitored_schemas(self) -> dict[str, list[dict]]:
-        """Get actual schemas for all monitored tables."""
-        result = {}
-        for table in MONITORED_TABLES:
-            result[table] = self.get_schema(table)
-        return result
+    def restore_all_to_baseline(self) -> dict:
+        """Restore all drifted columns back to their baseline types."""
+        current_report = scan_all_drifts(self)
+        results = {"restored": [], "failed": [], "skipped": []}
+
+        for table_name, info in current_report["tables"].items():
+            for drift in info.get("drifts", []):
+                if drift["drift_type"] == "TYPE_CHANGE":
+                    ok, msg = self.restore_column_to_baseline(table_name, drift["column"])
+                    if ok:
+                        results["restored"].append(f"{table_name}.{drift['column']}")
+                    else:
+                        results["failed"].append(f"{table_name}.{drift['column']}: {msg}")
+                elif drift["drift_type"] == "COLUMN_MISSING":
+                    results["skipped"].append(f"{table_name}.{drift['column']} (missing — cannot auto-restore)")
+
+        return results
+
+    # ─────────────────────────────────────────────
+    # Impact Metrics (from real data)
+    # ─────────────────────────────────────────────
+
+    def get_impact_metrics(self, table: str = "paysim_raw_transactions") -> dict:
+        """
+        Compute real data impact metrics for the current schema state.
+        Returns metrics like: total_rows, pct_numeric_amount_valid,
+        pct_fraud_label_valid, null_counts, etc.
+        """
+        if not self.is_live():
+            return self._sim_impact_metrics()
+
+        metrics = {
+            "mode": "live",
+            "table": table,
+            "total_rows": 0,
+            "columns": {},
+            "computed_at": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            cur = self._conn.cursor()
+
+            # Total rows
+            cur.execute(f"SELECT COUNT(*) FROM {table}")
+            metrics["total_rows"] = cur.fetchone()[0]
+
+            if metrics["total_rows"] == 0:
+                cur.close()
+                metrics["warning"] = "Table is empty — seed data first."
+                return metrics
+
+            # Per-column metrics for critical columns
+            critical_cols = {
+                "amount":       "double precision",
+                "oldbalanceorg": "double precision",
+                "isfraud":       "integer",
+                "isflaggedfraud": "integer",
+            }
+
+            for col, expected_type in critical_cols.items():
+                col_metrics = {}
+
+                # Check if column exists in actual schema
+                cur.execute(
+                    """
+                    SELECT data_type FROM information_schema.columns
+                    WHERE table_name = %s AND column_name = %s
+                    """,
+                    (table, col),
+                )
+                row = cur.fetchone()
+                if not row:
+                    col_metrics["status"] = "COLUMN_MISSING"
+                    metrics["columns"][col] = col_metrics
+                    continue
+
+                actual_type = row[0]
+                col_metrics["actual_type"] = actual_type
+                col_metrics["expected_type"] = expected_type
+                col_metrics["type_ok"] = (actual_type.lower() == expected_type.lower())
+
+                # NULL count
+                cur.execute(f"SELECT COUNT(*) FROM {table} WHERE {col} IS NULL")
+                col_metrics["null_count"] = cur.fetchone()[0]
+                col_metrics["null_pct"] = round(
+                    100.0 * col_metrics["null_count"] / metrics["total_rows"], 2
+                )
+
+                # If type is wrong (text/varchar), check how many values can be cast back
+                if not col_metrics["type_ok"] and actual_type.lower() in ("character varying", "text", "varchar"):
+                    if expected_type == "double precision":
+                        cur.execute(
+                            f"""
+                            SELECT COUNT(*) FROM {table}
+                            WHERE {col} ~ '^[-+]?[0-9]*\\.?[0-9]+([eE][-+]?[0-9]+)?$'
+                            """
+                        )
+                        castable = cur.fetchone()[0]
+                        col_metrics["castable_to_numeric"] = castable
+                        col_metrics["castable_pct"] = round(100.0 * castable / metrics["total_rows"], 2)
+                        col_metrics["corrupted_count"] = metrics["total_rows"] - castable
+                        col_metrics["corrupted_pct"] = round(
+                            100.0 * col_metrics["corrupted_count"] / metrics["total_rows"], 2
+                        )
+                    elif expected_type == "integer":
+                        cur.execute(
+                            f"SELECT COUNT(*) FROM {table} WHERE {col} ~ '^[0-9]+$'"
+                        )
+                        castable = cur.fetchone()[0]
+                        col_metrics["castable_to_integer"] = castable
+                        col_metrics["castable_pct"] = round(100.0 * castable / metrics["total_rows"], 2)
+
+                metrics["columns"][col] = col_metrics
+
+            cur.close()
+        except Exception as exc:
+            logger.error(f"Error computing impact metrics: {exc}")
+            metrics["error"] = str(exc)
+
+        return metrics
+
+    def _sim_impact_metrics(self) -> dict:
+        """Return simulated impact metrics based on current sim state."""
+        state = _get_sim_schema()
+        baseline = _load_baseline_json()
+
+        # Compute drifts in sim
+        drifts_sim = []
+        for table, fields in state.items():
+            base_fields = {f["column"].lower(): f for f in baseline.get(table, [])}
+            for f in fields:
+                col = f["column"].lower()
+                if col in base_fields and f["type"].lower() != base_fields[col]["type"].lower():
+                    drifts_sim.append(f)
+
+        sim_total = 50000  # Simulated row count
+        sim_drift_count = len(drifts_sim)
+
+        return {
+            "mode": "simulation",
+            "table": "paysim_raw_transactions",
+            "total_rows": sim_total,
+            "simulated_row_count": sim_total,
+            "active_drifts": sim_drift_count,
+            "columns": {
+                "amount": {
+                    "type_ok": not any(f["column"] == "amount" for f in drifts_sim),
+                    "null_count": 0,
+                    "null_pct": 0.0,
+                },
+                "isfraud": {
+                    "type_ok": not any(f["column"] == "isfraud" for f in drifts_sim),
+                    "null_count": 0,
+                    "null_pct": 0.0,
+                },
+            },
+            "computed_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def get_table_stats(self, table: str = "paysim_raw_transactions") -> dict:
+        """Basic stats: row count, fraud count, avg amount, transaction type breakdown."""
+        if not self.is_live():
+            return {
+                "mode": "simulation",
+                "total_rows": 50000,
+                "fraud_rows": 82,
+                "fraud_rate_pct": 0.16,
+                "avg_amount": 178234.52,
+                "transaction_types": {"PAYMENT": 18207, "TRANSFER": 5431, "CASH_OUT": 21626, "DEBIT": 2151, "CASH_IN": 2585},
+                "note": "Simulated values based on PaySim dataset distribution",
+            }
+        try:
+            cur = self._conn.cursor()
+            cur.execute(f"SELECT COUNT(*) FROM {table}")
+            total = cur.fetchone()[0]
+            if total == 0:
+                cur.close()
+                return {"mode": "live", "total_rows": 0, "note": "Table is empty — run seed first"}
+
+            # Fraud count (only works if isFraud is integer)
+            fraud_count = 0
+            try:
+                cur.execute(f"SELECT COUNT(*) FROM {table} WHERE isfraud = 1")
+                fraud_count = cur.fetchone()[0]
+            except Exception:
+                pass
+
+            # Avg amount (only works if amount is numeric)
+            avg_amount = None
+            try:
+                cur.execute(f"SELECT ROUND(AVG(amount)::numeric, 2) FROM {table}")
+                avg_amount = float(cur.fetchone()[0] or 0)
+            except Exception:
+                pass
+
+            # Transaction type breakdown
+            type_breakdown = {}
+            try:
+                cur.execute(f"SELECT type, COUNT(*) FROM {table} GROUP BY type ORDER BY COUNT(*) DESC")
+                type_breakdown = {r[0]: r[1] for r in cur.fetchall()}
+            except Exception:
+                pass
+
+            cur.close()
+            return {
+                "mode": "live",
+                "total_rows": total,
+                "fraud_rows": fraud_count,
+                "fraud_rate_pct": round(100.0 * fraud_count / total, 4) if total else 0,
+                "avg_amount": avg_amount,
+                "transaction_types": type_breakdown,
+            }
+        except Exception as exc:
+            logger.error(f"Error fetching table stats: {exc}")
+            return {"mode": "live", "error": str(exc)}
 
     def close(self):
         if self._conn:
@@ -293,60 +707,40 @@ class PostgresSchemaInspector:
 # Drift Detection
 # =============================================================================
 
-def detect_drift(
-    table_name: str,
-    baseline: list[dict],
-    actual: list[dict],
-) -> list[dict]:
+def detect_drift(table_name: str, baseline: list[dict], actual: list[dict]) -> list[dict]:
     """
-    Compare baseline schema vs actual schema for a table.
-
-    Returns a list of drift events:
-        {
-            "table":         str,
-            "column":        str,
-            "baseline_type": str,
-            "actual_type":   str,
-            "detected_at":   str (ISO timestamp),
-            "drift_type":    "TYPE_CHANGE" | "COLUMN_MISSING" | "COLUMN_ADDED"
-        }
+    Compare baseline vs actual schema. Returns list of drift events.
     """
     baseline_map = {f["column"].lower(): f for f in baseline}
     actual_map   = {f["column"].lower(): f for f in actual}
+    now = datetime.now(timezone.utc).isoformat()
     drifts = []
-    now = datetime.utcnow().isoformat() + "Z"
 
-    # Check for type changes and missing columns
-    for col, base_field in baseline_map.items():
+    for col, base in baseline_map.items():
+        if col.startswith("_"):
+            continue
         if col not in actual_map:
             drifts.append({
-                "table": table_name,
-                "column": col,
-                "baseline_type": base_field["type"],
-                "actual_type": "MISSING",
-                "detected_at": now,
-                "drift_type": "COLUMN_MISSING",
+                "table": table_name, "column": col,
+                "baseline_type": base["type"], "actual_type": "MISSING",
+                "detected_at": now, "drift_type": "COLUMN_MISSING",
+                "severity": "CRITICAL" if col in CRITICAL_COLUMNS else "MEDIUM",
             })
-        elif actual_map[col]["type"].lower() != base_field["type"].lower():
+        elif actual_map[col]["type"].lower() != base["type"].lower():
             drifts.append({
-                "table": table_name,
-                "column": col,
-                "baseline_type": base_field["type"],
-                "actual_type": actual_map[col]["type"],
-                "detected_at": now,
-                "drift_type": "TYPE_CHANGE",
+                "table": table_name, "column": col,
+                "baseline_type": base["type"], "actual_type": actual_map[col]["type"],
+                "detected_at": now, "drift_type": "TYPE_CHANGE",
+                "severity": "CRITICAL" if col in CRITICAL_COLUMNS else "MEDIUM",
             })
 
-    # Check for added columns (not in baseline)
-    for col, act_field in actual_map.items():
-        if col not in baseline_map:
+    for col in actual_map:
+        if col not in baseline_map and not col.startswith("_"):
             drifts.append({
-                "table": table_name,
-                "column": col,
-                "baseline_type": "N/A (new column)",
-                "actual_type": act_field["type"],
-                "detected_at": now,
-                "drift_type": "COLUMN_ADDED",
+                "table": table_name, "column": col,
+                "baseline_type": "N/A (new column)", "actual_type": actual_map[col]["type"],
+                "detected_at": now, "drift_type": "COLUMN_ADDED",
+                "severity": "LOW",
             })
 
     return drifts
@@ -355,55 +749,40 @@ def detect_drift(
 def scan_all_drifts(inspector: PostgresSchemaInspector) -> dict:
     """
     Scan all monitored tables and return a full drift report.
-
-    Returns:
-        {
-            "mode": "live" | "simulation",
-            "scanned_at": str,
-            "tables": {
-                "table_name": {
-                    "baseline": [...],
-                    "actual":   [...],
-                    "drifts":   [...],
-                    "status":   "OK" | "DRIFTED"
-                }
-            },
-            "total_drifts": int,
-            "any_drift": bool,
-        }
+    Reads baseline from DB (schema_baseline table) or JSON fallback.
     """
-    baseline_all = _load_baseline()
     actual_all = inspector.get_all_monitored_schemas()
     report = {
         "mode": inspector.mode(),
-        "scanned_at": datetime.utcnow().isoformat() + "Z",
+        "scanned_at": datetime.now(timezone.utc).isoformat(),
         "tables": {},
         "total_drifts": 0,
+        "critical_drifts": 0,
         "any_drift": False,
     }
 
     for table in MONITORED_TABLES:
-        baseline = baseline_all.get(table, [])
+        baseline = inspector.get_baseline_from_db(table)
         actual   = actual_all.get(table, [])
 
-        # If actual is empty (table doesn't exist), skip gracefully
         if not actual:
             report["tables"][table] = {
-                "baseline": baseline,
-                "actual": [],
-                "drifts": [],
-                "status": "TABLE_NOT_FOUND",
+                "baseline": baseline, "actual": [],
+                "drifts": [], "status": "TABLE_NOT_FOUND",
             }
             continue
 
         drifts = detect_drift(table, baseline, actual)
+        critical = [d for d in drifts if d.get("severity") == "CRITICAL"]
+
         report["tables"][table] = {
             "baseline": baseline,
             "actual": actual,
             "drifts": drifts,
             "status": "DRIFTED" if drifts else "OK",
         }
-        report["total_drifts"] += len(drifts)
+        report["total_drifts"]    += len(drifts)
+        report["critical_drifts"] += len(critical)
 
     report["any_drift"] = report["total_drifts"] > 0
     return report
