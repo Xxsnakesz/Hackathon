@@ -198,7 +198,6 @@ services:
   # --- System Update (creates DataHub entity search indices, e.g. datahubpolicyindex_v2) ---
   datahub-upgrade:
     image: acryldata/datahub-upgrade:v0.14.0
-    container_name: datahub-upgrade
     command: ["-u", "SystemUpdate"]
     environment:
       # MySQL connection
