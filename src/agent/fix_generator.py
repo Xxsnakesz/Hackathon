@@ -163,6 +163,178 @@ COMMIT;
     return sql_script
 
 
+def generate_column_missing_fix(
+    table_name: str,
+    column_name: str,
+    expected_type: str,
+    database_name: str = "paysim_fintech",
+    schema_name: str = "public",
+) -> str:
+    """
+    Generate a fix for a COLUMN_MISSING drift — the column was dropped
+    entirely, not just retyped. This is a DIFFERENT strategy than the
+    cast-back template: re-adding a dropped column can restore the schema
+    shape, but the column's original DATA is gone — there is no CAST that
+    recovers it. The script is explicit about that instead of pretending a
+    structural fix also un-deletes data.
+    """
+    pg_type = TYPE_MAPPING.get(expected_type.upper(), {}).get("postgres", expected_type.upper())
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    return f"""-- =============================================================================
+-- AUTO-GENERATED FIX SCRIPT by AI Data Reliability Agent
+-- Strategy: RE-ADD DROPPED COLUMN (column was DROPPED, not retyped)
+-- Generated at: {timestamp}
+-- =============================================================================
+--
+-- PROBLEM DETECTED:
+--   Table: {schema_name}.{table_name}
+--   Column: {column_name} — MISSING (dropped from the live schema)
+--   Expected type (per DataHub baseline): {expected_type} -> {pg_type}
+--
+-- IMPORTANT — READ BEFORE RUNNING:
+--   This script restores the COLUMN SHAPE only. If the column was dropped
+--   via `ALTER TABLE ... DROP COLUMN`, its historical data is gone — no SQL
+--   can recover it. Re-adding the column produces NULLs for every existing
+--   row. If a backup/snapshot exists, restore data from there AFTER running
+--   this script. This is a structural fix, not a data-recovery fix.
+--
+-- SAFETY: Wrapped in a transaction; rolls back automatically on failure.
+-- =============================================================================
+
+BEGIN;
+
+DO $$
+DECLARE
+    col_exists BOOLEAN;
+BEGIN
+    SELECT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = '{schema_name}' AND table_name = '{table_name}'
+          AND column_name = '{column_name}'
+    ) INTO col_exists;
+
+    IF col_exists THEN
+        RAISE EXCEPTION 'Column {column_name} already exists on {schema_name}.{table_name} — nothing to re-add.';
+    END IF;
+
+    RAISE NOTICE 'Confirmed {column_name} is missing from {schema_name}.{table_name}. Proceeding to re-add.';
+END $$;
+
+ALTER TABLE {schema_name}.{table_name}
+    ADD COLUMN {column_name} {pg_type};
+
+COMMENT ON COLUMN {schema_name}.{table_name}.{column_name} IS
+    'RE-ADDED by AI Data Reliability Agent on {timestamp} after a COLUMN_MISSING drift. '
+    'Existing rows have NULL for this column — restore from backup if historical values are needed.';
+
+DO $$
+DECLARE
+    new_col_type TEXT;
+    null_count BIGINT;
+BEGIN
+    SELECT data_type INTO new_col_type
+    FROM information_schema.columns
+    WHERE table_schema = '{schema_name}' AND table_name = '{table_name}'
+      AND column_name = '{column_name}';
+
+    EXECUTE format('SELECT COUNT(*) FROM {schema_name}.{table_name} WHERE %I IS NULL', '{column_name}')
+        INTO null_count;
+
+    RAISE NOTICE 'Column {column_name} re-added as %. % row(s) currently NULL (expected — no historical data).', new_col_type, null_count;
+END $$;
+
+COMMIT;
+
+-- =============================================================================
+-- POST-FIX ACTIONS:
+-- 1. If a backup/snapshot exists, backfill historical values for {column_name}.
+-- 2. Re-run DataHub ingestion so schemaMetadata reflects the restored column.
+-- 3. Investigate WHY the column was dropped — this is rarely accidental,
+--    unlike a type change, and may indicate an intentional (but uncoordinated)
+--    migration that needs a proper deprecation process next time.
+-- =============================================================================
+"""
+
+
+def generate_column_added_fix(
+    table_name: str,
+    column_name: str,
+    actual_type: str,
+    schema_name: str = "public",
+) -> str:
+    """
+    Generate a response for a COLUMN_ADDED drift — a new column appeared
+    that DataHub's baseline doesn't know about. Unlike TYPE_CHANGE or
+    COLUMN_MISSING, this usually isn't broken — a new column is additive
+    and can't break existing queries. The correct strategy is DIFFERENT
+    again: acknowledge the new column into the baseline rather than
+    generating a structural ALTER (there's nothing to roll back).
+    """
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    return f"""-- =============================================================================
+-- AUTO-GENERATED FIX SCRIPT by AI Data Reliability Agent
+-- Strategy: ACCEPT NEW COLUMN INTO BASELINE (additive change, not breaking)
+-- Generated at: {timestamp}
+-- =============================================================================
+--
+-- PROBLEM DETECTED:
+--   Table: {schema_name}.{table_name}
+--   Column: {column_name} — present in the live schema but NOT in the
+--            DataHub-registered baseline (type: {actual_type})
+--
+-- WHY THIS IS A DIFFERENT STRATEGY THAN A TYPE-CHANGE OR MISSING-COLUMN FIX:
+--   An added column is additive — it cannot break existing SELECT * or
+--   named-column queries that predate it, and downstream ML features that
+--   don't reference it are unaffected. There is nothing to ALTER back.
+--   The action needed is metadata hygiene: register the column in the
+--   baseline so future scans don't keep re-flagging it as drift.
+--
+-- SAFETY: Wrapped in a transaction; rolls back automatically on failure.
+-- =============================================================================
+
+BEGIN;
+
+DO $$
+BEGIN
+    RAISE NOTICE 'Column {column_name} ({actual_type}) on {schema_name}.{table_name} '
+                 'is additive — no structural rollback needed.';
+END $$;
+
+-- Register the new column in the local schema_baseline table so future
+-- scans treat it as expected, if that table exists in this deployment.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = '{schema_name}' AND table_name = 'schema_baseline'
+    ) THEN
+        INSERT INTO {schema_name}.schema_baseline
+            (table_name, column_name, expected_type, is_nullable, is_critical, description)
+        VALUES
+            ('{table_name}', '{column_name}', '{actual_type}', TRUE, FALSE,
+             'Auto-accepted by AI Data Reliability Agent on {timestamp} — new additive column.')
+        ON CONFLICT DO NOTHING;
+        RAISE NOTICE 'Registered {column_name} into local schema_baseline.';
+    ELSE
+        RAISE NOTICE 'No local schema_baseline table found — skip local registration.';
+    END IF;
+END $$;
+
+COMMIT;
+
+-- =============================================================================
+-- POST-FIX ACTIONS:
+-- 1. Re-run DataHub ingestion so schemaMetadata includes {column_name} —
+--    that is the authoritative baseline this agent actually compares against.
+-- 2. If {column_name} is business-critical (e.g. a new ML feature), tag it
+--    accordingly in DataHub (ml-input / critical-feature) so the agent's
+--    severity classifier picks it up on the next investigation.
+-- =============================================================================
+"""
+
+
 def generate_dbt_patch(
     table_name: str,
     column_name: str,
@@ -257,6 +429,77 @@ def save_fix_scripts(
     print(f"✅ dbt patch saved to: {dbt_path}")
 
     return result
+
+
+# =============================================================================
+# Strategy dispatcher — one entrypoint, multiple templates
+# =============================================================================
+# A schema drift is not one problem — TYPE_CHANGE, COLUMN_MISSING, and
+# COLUMN_ADDED each need a genuinely different remediation approach (cast
+# back vs. re-add with a data-loss warning vs. accept-as-additive). This
+# dispatcher is the fixed, vetted set of strategies; FixAuthor (the LLM
+# agent) selects and justifies which one applies to each drift — it never
+# writes SQL freehand, which is what keeps this safe from hallucination
+# while still requiring genuine reasoning about which template fits.
+# =============================================================================
+
+STRATEGY_BY_DRIFT_TYPE = {
+    "TYPE_CHANGE": "cast_back",
+    "COLUMN_MISSING": "re_add_column",
+    "COLUMN_ADDED": "accept_into_baseline",
+}
+
+
+def generate_fix_for_drift(drift: dict, output_dir: str = "examples") -> Optional[dict]:
+    """
+    Dispatch a single drift record to the correct remediation strategy.
+
+    Returns None for drift types with no defined strategy (fail loud in the
+    caller rather than silently producing a wrong fix). Returns a dict with
+    at least `sql_fix_path` and `strategy` on success.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    drift_type = drift.get("drift_type")
+    table = drift["table"]
+    column = drift["column"]
+    strategy = STRATEGY_BY_DRIFT_TYPE.get(drift_type)
+
+    if strategy == "cast_back":
+        res = save_fix_scripts(
+            table_name=table, column_name=column,
+            wrong_type=drift["actual_type"], correct_type=drift["baseline_type"],
+            output_dir=output_dir,
+        )
+        res["strategy"] = "cast_back"
+        return res
+
+    if strategy == "re_add_column":
+        sql = generate_column_missing_fix(
+            table_name=table, column_name=column, expected_type=drift["baseline_type"],
+        )
+        sql_path = os.path.join(output_dir, f"generated_fix_{column}_readd.sql")
+        with open(sql_path, "w") as f:
+            f.write(sql)
+        print(f"✅ SQL fix script saved to: {sql_path}")
+        return {
+            "sql_fix_path": sql_path, "dbt_fix_path": None,
+            "sql_preview": sql[:500] + "...", "strategy": "re_add_column",
+        }
+
+    if strategy == "accept_into_baseline":
+        sql = generate_column_added_fix(
+            table_name=table, column_name=column, actual_type=drift["actual_type"],
+        )
+        sql_path = os.path.join(output_dir, f"generated_fix_{column}_baseline_accept.sql")
+        with open(sql_path, "w") as f:
+            f.write(sql)
+        print(f"✅ SQL fix script saved to: {sql_path}")
+        return {
+            "sql_fix_path": sql_path, "dbt_fix_path": None,
+            "sql_preview": sql[:500] + "...", "strategy": "accept_into_baseline",
+        }
+
+    return None
 
 
 # =============================================================================

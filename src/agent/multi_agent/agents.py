@@ -317,42 +317,64 @@ class ImpactAssessor(BaseAgent):
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. FixAuthor — the fixer
 # ─────────────────────────────────────────────────────────────────────────────
+_STRATEGY_DESCRIPTIONS = {
+    "cast_back": "ALTER COLUMN ... TYPE ... USING CAST — restores the original type in place",
+    "re_add_column": "ALTER TABLE ... ADD COLUMN — restores shape, warns historical data is unrecoverable",
+    "accept_into_baseline": "No rollback — additive column registered into the baseline instead",
+}
+
+
 class FixAuthor(BaseAgent):
     name = "FixAuthor"
     emoji = "🔧"
-    role_summary = "Generates SQL + dbt remediation scripts for every TYPE_CHANGE drift."
+    role_summary = "Selects and generates the correct remediation strategy for every drift."
     allowed_tools = ("generate_fix_scripts",)
 
     def run(self, session, emit):
         drifts = session.all_drifts()
-        type_changes = [d for d in drifts if d.get("drift_type") == "TYPE_CHANGE"]
 
         iteration = session.fix_iterations + 1
         header = f"Iteration #{iteration}" if iteration > 1 else "First attempt"
 
         self._emit(emit, EventKind.AGENT_START,
-                   text=f"{header}: authoring fixes for {len(type_changes)} type-change drift(s).")
+                   text=f"{header}: authoring fixes for {len(drifts)} drift(s).")
 
-        scripts = self._tool(emit, "generate_fix_scripts", type_changes,
-                             summary=f"{len(type_changes)} fix script(s) generated")
+        scripts = self._tool(emit, "generate_fix_scripts", drifts,
+                             summary="Fix generation dispatched")
         session.fix_scripts = scripts
         session.fix_iterations = iteration
 
-        fix_lines = [f"- `{k}` → `{v.get('sql_fix_path','?')}`" for k, v in scripts.items()]
+        unhandled = scripts.get("_unhandled", [])
+        fix_lines = [
+            f"- `{k}` → strategy=`{v.get('strategy','?')}` "
+            f"({_STRATEGY_DESCRIPTIONS.get(v.get('strategy',''), 'unknown strategy')}) "
+            f"→ `{v.get('sql_fix_path','?')}`"
+            for k, v in scripts.items() if k != "_unhandled"
+        ]
         feedback_note = (
             f"The reviewer rejected the previous attempt with this feedback: "
             f"{session.reviewer_feedback}\n" if session.reviewer_feedback else ""
         )
+        unhandled_note = (
+            f"\nDrifts with NO defined remediation strategy (flag these for manual review, "
+            f"do not invent a fix): {unhandled}" if unhandled else ""
+        )
 
         narrative = self._llm(
             system=(
-                "You are the Fix Author in a data-reliability team. In 2-3 sentences, "
-                "describe the remediation scripts you generated and why the approach is "
-                "safe (transactional BEGIN/COMMIT, verification step, cast-back USING "
-                "clause). If reviewer feedback is present, acknowledge what you changed. "
-                "Quote only the file names given — never invent paths."
+                "You are the Fix Author in a data-reliability team. You never write SQL "
+                "freehand — you select the correct vetted strategy per drift from a fixed "
+                "set (cast_back for a type change, re_add_column for a dropped column, "
+                "accept_into_baseline for a new additive column) and the system generates "
+                "the script from that template. In 3-4 sentences: explain WHICH strategy "
+                "was used for WHICH drift and WHY that strategy fits (e.g. why a dropped "
+                "column can't just be cast back — the data is gone, so it needs re_add_column "
+                "with a data-loss warning, not the type-change template). If any drift has no "
+                "defined strategy, say so explicitly and recommend manual review — never "
+                "pretend a template applies when it doesn't. If reviewer feedback is present, "
+                "acknowledge what changed. Quote only the file names given — never invent paths."
             ),
-            user=f"{feedback_note}Generated scripts:\n{chr(10).join(fix_lines) or 'none — no TYPE_CHANGE drifts'}",
+            user=f"{feedback_note}Generated fixes:\n{chr(10).join(fix_lines) or 'none generated'}{unhandled_note}",
         )
 
         self._emit(emit, EventKind.AGENT_MESSAGE, text=narrative)
@@ -360,9 +382,9 @@ class FixAuthor(BaseAgent):
 
         output = AgentOutput(
             agent=self.name,
-            status="success" if scripts else "failed",
+            status="success" if fix_lines else "failed",
             summary=narrative,
-            findings={"n_scripts": len(scripts), "iteration": iteration},
+            findings={"n_scripts": len(fix_lines), "n_unhandled": len(unhandled), "iteration": iteration},
         )
         session.fix_output = output
         return output

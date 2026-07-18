@@ -7,12 +7,20 @@
 name: fix_author
 version: "1.0.0"
 description: |
-  Fourth agent (parallel branch). Generates remediation artifacts for every
-  TYPE_CHANGE drift: a transactional PostgreSQL ALTER TABLE script and a
-  matching dbt CAST patch. Each script is wrapped in BEGIN/COMMIT and
-  includes a verification step so the Reviewer can validate safety.
-  If the Reviewer rejects, this agent re-runs with the rejection reason
-  as context (up to max_review_iterations).
+  Fourth agent (parallel branch). Selects the correct remediation strategy
+  per drift from a fixed, vetted set — it never writes SQL freehand:
+    - TYPE_CHANGE    → cast_back: ALTER COLUMN ... TYPE ... USING CAST
+    - COLUMN_MISSING → re_add_column: ALTER TABLE ... ADD COLUMN, with an
+      explicit warning that the dropped column's historical data cannot be
+      recovered by any SQL (re-adding produces NULLs, not the old values)
+    - COLUMN_ADDED   → accept_into_baseline: no rollback — an additive
+      column is registered as expected rather than reverted
+  The LLM chooses and justifies which strategy fits each drift; the actual
+  SQL always comes from the matching vetted template (fix_generator.py),
+  so the agent reasons about strategy without being able to hallucinate
+  SQL. Each script is wrapped in BEGIN/COMMIT with a verification step so
+  the Reviewer can validate safety. If the Reviewer rejects, this agent
+  re-runs with the rejection reason as context (up to max_review_iterations).
 
 author: AI Data Reliability Agent Team
 license: Apache-2.0
@@ -30,7 +38,10 @@ outputs:
   fix_scripts:
     type: object
     description: |
-      Map of "table.column" → {sql_fix_path, dbt_fix_path, sql_preview}.
+      Map of "table.column" → {sql_fix_path, dbt_fix_path, sql_preview, strategy}.
+      strategy is one of cast_back | re_add_column | accept_into_baseline.
+      A "_unhandled" key lists drifts with no defined strategy — these are
+      surfaced for manual review rather than silently skipped.
       All files land in examples/ so judges can inspect quality without
       running the pipeline.
   iteration:

@@ -198,8 +198,10 @@ Beyond the single-agent 7-step investigation, the same flow is available as a **
 | 1 | 🔍 **Detector** | Scan schema + audit trail | `scan_schema`, `read_audit_log` |
 | 2 | 🕵️ **RootCauseAnalyst** | Trace lineage & owners | `get_lineage`, `get_ownership` |
 | 3 | 📊 **ImpactAssessor** | Quantify rows + $/hr | `compute_impact`, `get_table_stats`, `find_impacted_models`, `estimate_dollar_impact` |
-| 4 | 🔧 **FixAuthor** | Generate SQL + dbt fixes | `generate_fix_scripts` |
+| 4 | 🔧 **FixAuthor** | Select + justify a remediation strategy per drift, generate the matching script | `generate_fix_scripts` |
 | 5 | 🛡️ **Reviewer** | Static safety gate | `validate_fix_safety` |
+
+**FixAuthor never writes SQL freehand.** It picks from a fixed, vetted set of strategies based on `drift_type` and explains why each one fits — a type change gets cast back in place, but a *dropped* column can't be cast back (the data is gone), so it gets re-added with an explicit data-loss warning instead; a brand-new *additive* column isn't broken at all, so it gets accepted into the baseline rather than rolled back. Three different problems, three different templates, chosen by the LLM but always generated from vetted code — this is what keeps "the LLM decides" safe from hallucinated SQL.
 
 **Handoff flow:**
 

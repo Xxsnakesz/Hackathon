@@ -16,7 +16,7 @@ from typing import Any, Callable
 
 from src.agent.db_inspector import PostgresSchemaInspector, scan_all_drifts
 from src.agent.datahub_gms_client import DatahubGmsClient
-from src.agent.fix_generator import save_fix_scripts
+from src.agent.fix_generator import STRATEGY_BY_DRIFT_TYPE, generate_fix_for_drift
 from src.agent.pipeline_discovery import PipelineContext
 
 logger = logging.getLogger("MultiAgent.Tools")
@@ -140,20 +140,33 @@ def tool_estimate_dollar_impact(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def tool_generate_fix_scripts(drifts: list[dict]) -> dict:
-    """Generate SQL + dbt fix per TYPE_CHANGE drift. Returns {key: paths}."""
+    """
+    Generate a fix for every drift, dispatching to the strategy matching its
+    drift_type (see fix_generator.STRATEGY_BY_DRIFT_TYPE):
+      TYPE_CHANGE    -> cast_back            (ALTER ... USING CAST)
+      COLUMN_MISSING -> re_add_column        (ALTER ... ADD COLUMN, data-loss warned)
+      COLUMN_ADDED   -> accept_into_baseline (register as expected, no rollback)
+
+    Each drift_type needs a genuinely different remediation — this is NOT
+    the same template with swapped parameters. Drifts with no defined
+    strategy are reported separately rather than silently skipped, so
+    FixAuthor (and the Reviewer) can see the gap instead of it disappearing.
+
+    Returns {key: result_dict}. Each result_dict includes `strategy` so the
+    LLM can explain which one it used and why.
+    """
     EXAMPLES_DIR.mkdir(exist_ok=True)
     results: dict = {}
+    unhandled: list[str] = []
     for d in drifts:
-        if d.get("drift_type") != "TYPE_CHANGE":
+        res = generate_fix_for_drift(d, output_dir=str(EXAMPLES_DIR))
+        key = f"{d['table']}.{d['column']}"
+        if res is None:
+            unhandled.append(f"{key} (drift_type={d.get('drift_type')})")
             continue
-        res = save_fix_scripts(
-            table_name=d["table"],
-            column_name=d["column"],
-            wrong_type=d["actual_type"],
-            correct_type=d["baseline_type"],
-            output_dir=str(EXAMPLES_DIR),
-        )
-        results[f"{d['table']}.{d['column']}"] = res
+        results[key] = res
+    if unhandled:
+        results["_unhandled"] = unhandled
     return results
 
 
@@ -192,6 +205,10 @@ def tool_validate_fix_safety(fix_scripts: dict) -> dict:
         }
 
     for key, fs in fix_scripts.items():
+        if key == "_unhandled":
+            for entry in fs:
+                issues.append({"file": entry, "reason": "No remediation strategy defined for this drift_type"})
+            continue
         sql_path = fs.get("sql_fix_path")
         if not sql_path or not Path(sql_path).exists():
             issues.append({"file": key, "reason": "SQL fix file missing on disk"})
