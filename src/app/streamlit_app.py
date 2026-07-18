@@ -143,6 +143,17 @@ html, body, [class*="css"] { font-family:'Inter',sans-serif; }
 .t-bad  { color:#f87171; font-family:'JetBrains Mono',monospace; font-size:.82rem; font-weight:600; }
 .t-name { color:#e2e8f0; font-family:'JetBrains Mono',monospace; font-weight:500; }
 
+/* ── Origin badges (show whether output came from tool, LLM, or safety guard) ── */
+.origin {
+    display:inline-block; font-family:'JetBrains Mono',monospace;
+    font-size:.65rem; font-weight:700; letter-spacing:.06em;
+    padding:2px 7px; border-radius:6px; margin-right:8px;
+    vertical-align:middle; text-transform:uppercase;
+}
+.origin-tool  { background:rgba(59,130,246,.14); color:#93c5fd; border:1px solid rgba(59,130,246,.35); }
+.origin-llm   { background:rgba(167,139,250,.14); color:#c4b5fd; border:1px solid rgba(139,92,246,.35); }
+.origin-guard { background:rgba(16,185,129,.14); color:#6ee7b7; border:1px solid rgba(16,185,129,.35); }
+
 /* ── Log box ── */
 .logbox {
     background:#0a0f1a; border:1px solid rgba(255,255,255,.07);
@@ -622,6 +633,17 @@ with tab_team:
         "DataHub write-back only happens after the Reviewer approves."
     )
 
+    # Origin legend — every event below is tagged so it's clear whether the
+    # LLM produced the reasoning or a tool produced the raw data.
+    st.markdown(
+        '<div style="margin:8px 0 14px">'
+        '<span class="origin origin-tool">⚙ Tool</span> deterministic Python — schema scans, lineage reads, SQL generation, static validation. &nbsp;'
+        '<span class="origin origin-llm">🧠 LLM</span> reasoning over tool output — never emits executable SQL. &nbsp;'
+        '<span class="origin origin-guard">🛡 Guard</span> safety gate — static validator + Reviewer verdict; write-back is blocked until this approves.'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
     # LLM status banner — pure-LLM design: a working provider is required.
     llm_ready = llm_available()
     if llm_ready:
@@ -763,17 +785,39 @@ with tab_team:
                     elif evt.kind == EventKind.TOOL_CALL:
                         box = status_boxes.get(agent)
                         if box:
-                            box.write(f"🔧 `{evt.tool or evt.text}`")
+                            box.markdown(
+                                f'<span class="origin origin-tool">⚙ Tool</span> '
+                                f'<code>{evt.tool or evt.text}</code>',
+                                unsafe_allow_html=True,
+                            )
 
                     elif evt.kind == EventKind.TOOL_RESULT:
                         box = status_boxes.get(agent)
                         if box and evt.tool_result_summary:
-                            box.write(f"↳ {evt.tool_result_summary}")
+                            # Reviewer's validate_fix_safety result gets a distinct
+                            # "guard" badge — this is the static safety verdict.
+                            if agent == "Reviewer" and evt.tool == "validate_fix_safety":
+                                box.markdown(
+                                    f'<span class="origin origin-guard">🛡 Guard</span> '
+                                    f'{evt.tool_result_summary}',
+                                    unsafe_allow_html=True,
+                                )
+                            else:
+                                box.markdown(
+                                    f'<span class="origin origin-tool">⚙ Tool</span> '
+                                    f'↳ {evt.tool_result_summary}',
+                                    unsafe_allow_html=True,
+                                )
 
                     elif evt.kind == EventKind.AGENT_MESSAGE:
                         box = status_boxes.get(agent)
                         if box:
-                            box.write(evt.text)
+                            # Everything an agent "says" is LLM output — the tool
+                            # rows above show what data it reasoned from.
+                            box.markdown(
+                                f'<span class="origin origin-llm">🧠 LLM</span> {evt.text}',
+                                unsafe_allow_html=True,
+                            )
 
                     elif evt.kind == EventKind.AGENT_COMPLETE:
                         box = status_boxes.get(agent)
@@ -787,10 +831,18 @@ with tab_team:
 
                     elif evt.kind == EventKind.REVIEW_VERDICT:
                         with feed:
+                            badge = ('<span class="origin origin-guard">🛡 Guard</span>'
+                                     '<span class="origin origin-llm">🧠 LLM</span>')
                             if evt.text == "APPROVE":
-                                st.success(f"✅ Reviewer verdict: **APPROVE**")
+                                st.markdown(
+                                    f"{badge} ✅ Reviewer verdict: **APPROVE** — DataHub write-back authorised.",
+                                    unsafe_allow_html=True,
+                                )
                             else:
-                                st.error(f"❌ Reviewer verdict: **{evt.text}**")
+                                st.markdown(
+                                    f"{badge} ❌ Reviewer verdict: **{evt.text}** — DataHub write-back blocked. FixAuthor will revise.",
+                                    unsafe_allow_html=True,
+                                )
 
                     elif evt.kind == EventKind.HANDOFF:
                         pass  # covered by the "Revision round" warning above

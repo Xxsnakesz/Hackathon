@@ -185,6 +185,7 @@ DataHub already does a lot out of the box. Here's what this project adds that Da
 - **Auto-generated fixes** — downloadable SQL `ALTER TABLE` scripts and dbt CAST patches ready to review and merge
 - **Multi-model aware** — one drift can affect several downstream ML models; the agent tags every one of them
 - **Multi-agent team with safety gate** — the same investigation can be run as a five-agent team where the Reviewer can *veto* an unsafe fix and force a revision, and DataHub write-back is only allowed after approval (details below)
+- **Prompt-injection resilient by design** — untrusted free-text fields (audit-log reasons, DataHub descriptions) inform LLM reasoning but never reach the SQL generation path; a static safety validator gates the Reviewer, so no `DROP`/`TRUNCATE`/unbounded `DELETE` can survive approval (see [Why the LLM Doesn't Generate SQL Directly](#-why-the-llm-doesnt-generate-sql-directly))
 
 ---
 
@@ -227,6 +228,40 @@ Reference implementations:
 - Agents & tool separation: [`src/agent/multi_agent/agents.py`](src/agent/multi_agent/agents.py), [`src/agent/multi_agent/tools.py`](src/agent/multi_agent/tools.py)
 - Orchestrator + review loop: [`src/agent/multi_agent/orchestrator.py`](src/agent/multi_agent/orchestrator.py)
 - One YAML skill per agent for the DataHub Skills bonus criterion: [`datahub_skills/`](datahub_skills/) — `detector_agent.yaml`, `root_cause_analyst.yaml`, `impact_assessor.yaml`, `fix_author.yaml`, `reviewer_agent.yaml`, `multi_agent_orchestrator.yaml`
+
+---
+
+## 🛡️ Why the LLM Doesn't Generate SQL Directly
+
+We deliberately split responsibilities between the LLM and the tool layer. This isn't a compromise or a limitation — it's the pattern that data platform teams actually deploy in production.
+
+**The concern:** every LLM has a non-zero chance of hallucinating a destructive command — `DROP TABLE`, a forgotten `WHERE` clause, the wrong table name — especially when prompt context contains untrusted free text (audit-log reasons written by engineers, DataHub descriptions edited by data stewards, alert messages piped from monitoring systems). In a data reliability tool that literally exists to prevent silent failures, "the AI generated an unsafe fix and we ran it" is unacceptable.
+
+**How this project handles it:**
+
+| Concern | Naive LLM agent | This project |
+|---|---|---|
+| Who produces the SQL fix? | LLM emits SQL as a string in its response | `generate_fix_scripts` tool composes it from parameterized templates + real drift metadata |
+| Prompt-injection surface | Every field in the prompt reaches the executable output path | Free-text fields (`change_reason`, `changed_by`) inform reasoning but never reach the SQL generation path |
+| Destructive-command risk | LLM can decide `DROP TABLE` "solves" the drift | Static safety validator rejects `DROP`, `TRUNCATE`, unbounded `DELETE`, missing transaction wrapping — Reviewer *cannot* approve a script that failed validation |
+| Reviewer role | Optional / cosmetic | Mandatory graph node with veto power; on `REJECT_UNSAFE` the graph routes back to FixAuthor with the rejection reason (bounded by `max_review_iterations`) |
+| Write-back trigger | Whenever the LLM says so | Only after Reviewer verdict is `APPROVE`; rejected fixes exit through `writeback_skip → END` and never touch DataHub |
+
+**What the LLM is used for**: reasoning about *context* — was this drift intentional? Which model is impacted? Does the generated fix semantically match the drift type? Are there any suspicious patterns the static validator missed? These are the tasks LLMs are genuinely good at. Producing executable code that touches production systems is the task they're genuinely dangerous at.
+
+Reviewer output at runtime is rendered as an itemised checklist so you can *see* the guard rails firing — for example:
+
+```
+🛡️ Reviewer Analysis
+  ✅ Static: transaction wrapped in BEGIN/COMMIT
+  ✅ Static: no DROP / TRUNCATE / unbounded DELETE
+  ✅ Static: USING clause safely casts VARCHAR → DOUBLE PRECISION
+  ✅ LLM: semantic check — script only affects drifted column, no side effects
+  ─────────────
+  Final Verdict: APPROVE
+```
+
+This is a boring architecture on purpose. Boring is what survives production.
 
 ---
 
