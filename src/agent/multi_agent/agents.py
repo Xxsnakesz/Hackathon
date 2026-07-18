@@ -1,26 +1,29 @@
 """
-Five specialized agents.
+Five specialized agents — pure LLM reasoning over real tool output.
 
 Each agent:
   1. Emits an AGENT_START event.
-  2. Runs its deterministic tool calls (via ToolRegistry) — the tools it is
-     *allowed* to call are declared in `allowed_tools`, which enforces
-     separation of concern between roles.
-  3. Optionally asks Claude for a short narrative commentary (via the
-     ClaudeNarrator). If Claude is unavailable, a deterministic template
-     produces the same commentary from the raw findings.
-  4. Writes its output back into the shared InvestigationSession.
+  2. Runs its tool calls (via ToolRegistry) — the tools it is *allowed* to
+     call are declared in `allowed_tools`, which enforces separation of
+     concern between roles. Tools run in code; the LLM never fabricates
+     drift data, lineage, or SQL.
+  3. Sends the raw tool output to the LLM and emits the LLM's analysis as
+     its message. There is no template fallback — if the LLM is down the
+     agent fails loudly (NarratorError) and the orchestrator surfaces it.
+  4. Writes its findings back into the shared InvestigationSession.
   5. Emits AGENT_COMPLETE and returns an AgentOutput for the orchestrator.
 
-The reviewer is special: it produces a ReviewVerdict that the orchestrator uses
-to decide whether to loop back to the FixAuthor for a revision.
+The Reviewer both runs the static safety validator AND asks the LLM for the
+final verdict, feeding it the validator's findings. The LLM's first line must
+be APPROVE / REJECT_UNSAFE / REJECT_INCOMPLETE; if it flags unsafe patterns
+the orchestrator loops back to the FixAuthor.
 """
 from __future__ import annotations
 
 import logging
-from typing import Callable, Iterable, Optional
+from typing import Callable, Optional
 
-from src.agent.multi_agent.llm import ClaudeNarrator
+from src.agent.multi_agent.llm import Narrator
 from src.agent.multi_agent.tools import ToolRegistry, _bare_table_name
 from src.agent.multi_agent.types import (
     AgentEvent,
@@ -41,7 +44,7 @@ class BaseAgent:
     role_summary: str = ""
     allowed_tools: tuple[str, ...] = ()
 
-    def __init__(self, registry: ToolRegistry, narrator: ClaudeNarrator):
+    def __init__(self, registry: ToolRegistry, narrator: Narrator):
         self.registry = registry
         self.narrator = narrator
 
@@ -65,8 +68,8 @@ class BaseAgent:
         )
         return result
 
-    def _narrate(self, system: str, user: str, fallback: str) -> str:
-        return self.narrator.narrate(system, user, fallback)
+    def _llm(self, system: str, user: str) -> str:
+        return self.narrator.narrate(system, user)
 
     # ── subclass contract ────────────────────────────────────────────────
     def run(self, session: InvestigationSession, emit: EventEmitter) -> AgentOutput:
@@ -85,16 +88,13 @@ class DetectorAgent(BaseAgent):
     def run(self, session, emit):
         self._emit(emit, EventKind.AGENT_START, text="Scanning monitored tables for drift.")
 
-        drift_report = self._tool(emit, "scan_schema",
-                                  summary=f"Scanned tables, "
-                                          f"found {0 if not None else ''}")
+        drift_report = self._tool(emit, "scan_schema", summary="Schema scan complete")
         n_tables = len(drift_report.get("tables", {}))
         n_drifts = drift_report.get("total_drifts", 0)
         n_crit = drift_report.get("critical_drifts", 0)
         session.drift_report = drift_report
 
-        audit = self._tool(emit, "read_audit_log",
-                           summary=f"Read {0} audit entries")
+        audit = self._tool(emit, "read_audit_log", summary="Audit log read")
         session.audit_log = audit
 
         # Enrich each drift with the matching audit entry (who/when/why)
@@ -112,33 +112,24 @@ class DetectorAgent(BaseAgent):
                     match.get("changed_at", d["detected_at"]) if match else d["detected_at"]
                 )
 
-        fallback = (
-            f"Scanned {n_tables} table(s). "
-            f"Detected {n_drifts} drift(s) — {n_crit} CRITICAL. "
-            f"Cross-referenced with {len(audit)} recent audit entry/entries."
+        drift_lines = [
+            f"- {d['table']}.{d['column']}: {d['baseline_type']} → {d['actual_type']} "
+            f"[{d.get('severity','?')}] by {d.get('changed_by','?')} — {d.get('change_reason','?')}"
+            for d in session.all_drifts()
+        ]
+        narrative = self._llm(
+            system=(
+                "You are the Detector agent in a data-reliability team investigating "
+                "a production incident. In 2-3 sentences of plain English, report what "
+                "your schema scan found. Be specific about columns, type changes, and "
+                "who made them. Use ONLY the facts given — never invent numbers or names."
+            ),
+            user=(
+                f"Tables scanned: {n_tables}. Drifts found: {n_drifts} "
+                f"({n_crit} critical). Audit entries: {len(audit)}.\n"
+                f"Drift details:\n" + ("\n".join(drift_lines) or "No drifts detected — all schemas match baseline.")
+            ),
         )
-        if session.llm_enabled:
-            drift_lines = [
-                f"- {d['table']}.{d['column']}: {d['baseline_type']} → {d['actual_type']} "
-                f"[{d.get('severity','?')}] by {d.get('changed_by','?')}"
-                for d in session.all_drifts()
-            ]
-            narrative = self._narrate(
-                system=(
-                    "You are the Detector agent in a data-reliability team. "
-                    "In 2-3 sentences, plain English, summarise what you just found. "
-                    "Be specific about the columns and who changed them. "
-                    "Do not invent numbers."
-                ),
-                user=(
-                    f"Tables scanned: {n_tables}. Drifts: {n_drifts} "
-                    f"({n_crit} critical). Details:\n" +
-                    ("\n".join(drift_lines) or "No drifts.")
-                ),
-                fallback=fallback,
-            )
-        else:
-            narrative = fallback
 
         self._emit(emit, EventKind.AGENT_MESSAGE, text=narrative)
         handoff_text = "Handoff → RootCauseAnalyst" if n_drifts else "No drift — investigation ends here."
@@ -176,55 +167,40 @@ class RootCauseAnalyst(BaseAgent):
                    text=f"Investigating root cause for {len(drifts)} drift(s) "
                         f"across {len(affected_tables)} table(s).")
 
-        trace, edges = self._tool(emit, "get_lineage",
-                                  summary=f"Traced {len(session.detector_output.findings) if session.detector_output else 0} lineage edges")
+        trace, edges = self._tool(emit, "get_lineage", summary="Lineage traced")
         session.lineage_trace = trace
         session.lineage_graph = edges
 
         ownership = self._tool(emit, "get_ownership",
-                               summary=f"Fetched owners for {len(affected_tables)} table(s)")
+                               summary=f"Owners fetched for {len(affected_tables)} table(s)")
         session.ownership = ownership
 
-        # Deterministic root-cause narrative
         drift_lines = []
         for d in drifts:
-            who = d.get("changed_by", "unknown")
-            reason = d.get("change_reason", "N/A")
-            owner_line = ""
             owners = ownership.get(d["table"], [])
-            if owners:
-                owner_line = f" | owners: {', '.join(owners[:2])}"
+            owner_str = f" | owners: {', '.join(owners[:2])}" if owners else " | owners: none registered"
             drift_lines.append(
-                f"  • [{d.get('severity','?')}] {d['table']}.{d['column']}: "
-                f"{d['baseline_type']} → {d['actual_type']} by `{who}` — {reason}{owner_line}"
+                f"- [{d.get('severity','?')}] {d['table']}.{d['column']}: "
+                f"{d['baseline_type']} → {d['actual_type']} by `{d.get('changed_by','?')}` "
+                f"— reason given: {d.get('change_reason','?')}{owner_str}"
             )
 
-        deterministic = (
-            f"SCHEMA DRIFT in {', '.join(affected_tables)}.\n"
-            + "\n".join(drift_lines)
-            + "\n\nHypothesis: schema change on source table(s) was not coordinated "
-              "with downstream ML consumers. Type changes break numeric operations in "
-              "feature engineering, causing silent inference failures."
+        narrative = self._llm(
+            system=(
+                "You are the Root Cause Analyst in a data-reliability team. Given a "
+                "drift summary, the audit trail (who changed what and their stated "
+                "reason), table ownership, and the DataHub lineage trace, write a "
+                "3-4 sentence root-cause hypothesis: WHO likely caused this, WHY it "
+                "happened (based on their stated reason), and WHICH downstream systems "
+                "will break according to the lineage. Refer to real names and columns "
+                "from the input. Never speculate beyond the given data."
+            ),
+            user=(
+                f"Drifts with audit context:\n{chr(10).join(drift_lines)}\n\n"
+                f"Lineage trace (upstream of each ML model):\n{trace}\n\n"
+                f"Ownership by table: {ownership}"
+            ),
         )
-
-        if session.llm_enabled:
-            narrative = self._narrate(
-                system=(
-                    "You are the Root Cause Analyst in a data-reliability team. "
-                    "Given a drift summary, an audit trail, ownership info and a "
-                    "lineage trace, write a 3-4 sentence hypothesis about WHO likely "
-                    "caused this and WHY, and which downstream systems it will hurt. "
-                    "Refer to real names from the input. No speculation beyond the data."
-                ),
-                user=(
-                    f"Drifts:\n{chr(10).join(drift_lines)}\n\n"
-                    f"Lineage:\n{trace}\n\n"
-                    f"Ownership by table: {ownership}"
-                ),
-                fallback=deterministic,
-            )
-        else:
-            narrative = deterministic
 
         session.root_cause = narrative
         session.hypothesis = {
@@ -269,16 +245,15 @@ class ImpactAssessor(BaseAgent):
         self._emit(emit, EventKind.AGENT_START,
                    text=f"Computing business impact for {len(drifts)} drift(s).")
 
-        impact = self._tool(emit, "compute_impact",
-                            summary=f"Impact metrics computed")
+        impact = self._tool(emit, "compute_impact", summary="Impact metrics computed")
         session.impact_metrics = impact
 
         stats = self._tool(emit, "get_table_stats",
-                           summary=f"Table stats: {impact.get('total_rows', 0):,} rows")
+                           summary=f"{impact.get('total_rows', 0):,} rows analysed")
         session.table_stats = stats
 
         impacted = self._tool(emit, "find_impacted_models", affected_tables,
-                              summary=f"{0} model(s) at risk")
+                              summary="Downstream models resolved")
         session.impacted_models = impacted
 
         total_rows = int(stats.get("total_rows") or 0)
@@ -286,54 +261,39 @@ class ImpactAssessor(BaseAgent):
         dollar_hr = self._tool(
             emit, "estimate_dollar_impact",
             n_crit, total_rows, len(impacted), fraud_rate,
-            summary="Dollar exposure heuristic applied",
+            summary="Exposure heuristic applied",
         )
         session.dollar_impact_hour = dollar_hr
 
-        # Deterministic impact narrative
         col_lines = []
         for col, cm in impact.get("columns", {}).items():
             if not cm.get("type_ok", True):
                 if isinstance(cm.get("corrupted_count"), int):
                     col_lines.append(
-                        f"  • `{col}`: {cm['corrupted_count']:,} rows corrupted "
+                        f"- `{col}`: {cm['corrupted_count']:,} rows corrupted "
                         f"({cm.get('corrupted_pct','?')}%), "
                         f"{cm.get('castable_pct','?')}% castable back"
                     )
                 else:
-                    col_lines.append(f"  • `{col}`: type mismatch")
+                    col_lines.append(f"- `{col}`: type mismatch detected")
 
-        model_lines = [f"  • {m['name']} [{m['platform']}]" for m in impacted] or ["  • (no downstream ML model matched)"]
-
-        deterministic = (
-            f"Impact on {total_rows:,} transactions "
-            f"({stats.get('fraud_rows', '?')} fraud cases, {fraud_rate:.4f}% rate).\n"
-            f"Impacted ML model(s):\n" + "\n".join(model_lines) + "\n" +
-            ("Per-column corruption:\n" + "\n".join(col_lines) if col_lines else "") +
-            f"\nRough exposure heuristic: ~${dollar_hr:,.0f}/hour "
-            f"({len(impacted)} model(s) × {n_crit} critical drift multiplier)."
+        narrative = self._llm(
+            system=(
+                "You are the Impact Assessor in a data-reliability team. Given raw "
+                "impact metrics, produce a 3-sentence business summary: rows affected, "
+                "which ML models are at risk, and the estimated hourly dollar exposure. "
+                "The dollar figure is a documented heuristic — call it 'estimated' or "
+                "'rough', never a forecast. Use the exact numbers given; never invent any."
+            ),
+            user=(
+                f"Total rows: {total_rows:,}. Fraud rows: {stats.get('fraud_rows','?')}. "
+                f"Fraud rate: {fraud_rate}%.\n"
+                f"Impacted ML models: {[m['name'] for m in impacted] or 'none matched'}.\n"
+                f"Critical drifts: {n_crit}.\n"
+                f"Estimated $/hour exposure (heuristic): {dollar_hr}.\n"
+                f"Per-column corruption:\n{chr(10).join(col_lines) or 'none measured'}"
+            ),
         )
-
-        if session.llm_enabled:
-            narrative = self._narrate(
-                system=(
-                    "You are the Impact Assessor in a data-reliability team. "
-                    "Given raw impact metrics, produce a 3-sentence business summary: "
-                    "rows affected, models at risk, and estimated hourly exposure. "
-                    "The dollar figure is a documented heuristic — say 'estimated' or "
-                    "'rough' — never claim it as forecast. Use the exact numbers given."
-                ),
-                user=(
-                    f"Total rows: {total_rows}. Fraud rows: {stats.get('fraud_rows','?')}. "
-                    f"Impacted models: {[m['name'] for m in impacted]}. "
-                    f"Critical drifts: {n_crit}. "
-                    f"Dollar/hour heuristic: {dollar_hr}. "
-                    f"Column corruption:\n{chr(10).join(col_lines) or 'none'}"
-                ),
-                fallback=deterministic,
-            )
-        else:
-            narrative = deterministic
 
         self._emit(emit, EventKind.AGENT_MESSAGE, text=narrative)
         self._emit(emit, EventKind.AGENT_COMPLETE,
@@ -370,37 +330,30 @@ class FixAuthor(BaseAgent):
         iteration = session.fix_iterations + 1
         header = f"Iteration #{iteration}" if iteration > 1 else "First attempt"
 
-        prefix = ""
-        if session.reviewer_feedback:
-            prefix = f"Reviewer feedback last round: {session.reviewer_feedback}\n"
-
         self._emit(emit, EventKind.AGENT_START,
                    text=f"{header}: authoring fixes for {len(type_changes)} type-change drift(s).")
 
         scripts = self._tool(emit, "generate_fix_scripts", type_changes,
-                             summary=f"Generated {len(type_changes)} fix script(s)")
+                             summary=f"{len(type_changes)} fix script(s) generated")
         session.fix_scripts = scripts
         session.fix_iterations = iteration
 
-        fix_lines = [f"  • `{k}` → `{v.get('sql_fix_path','?')}`" for k, v in scripts.items()]
-        deterministic = (
-            f"{prefix}Generated {len(scripts)} fix script(s) — each wrapped in BEGIN/COMMIT "
-            f"and containing a post-fix verification step.\n" + "\n".join(fix_lines)
+        fix_lines = [f"- `{k}` → `{v.get('sql_fix_path','?')}`" for k, v in scripts.items()]
+        feedback_note = (
+            f"The reviewer rejected the previous attempt with this feedback: "
+            f"{session.reviewer_feedback}\n" if session.reviewer_feedback else ""
         )
 
-        if session.llm_enabled:
-            narrative = self._narrate(
-                system=(
-                    "You are the Fix Author in a data-reliability team. "
-                    "In 2 sentences, describe what you generated and why the approach "
-                    "is safe (transactional, verification step, cast-back). Do NOT invent "
-                    "file names — quote the ones given."
-                ),
-                user=f"Scripts:\n{chr(10).join(fix_lines) or 'none'}\n{prefix}",
-                fallback=deterministic,
-            )
-        else:
-            narrative = deterministic
+        narrative = self._llm(
+            system=(
+                "You are the Fix Author in a data-reliability team. In 2-3 sentences, "
+                "describe the remediation scripts you generated and why the approach is "
+                "safe (transactional BEGIN/COMMIT, verification step, cast-back USING "
+                "clause). If reviewer feedback is present, acknowledge what you changed. "
+                "Quote only the file names given — never invent paths."
+            ),
+            user=f"{feedback_note}Generated scripts:\n{chr(10).join(fix_lines) or 'none — no TYPE_CHANGE drifts'}",
+        )
 
         self._emit(emit, EventKind.AGENT_MESSAGE, text=narrative)
         self._emit(emit, EventKind.AGENT_COMPLETE, text="Handoff → Reviewer")
@@ -421,44 +374,65 @@ class FixAuthor(BaseAgent):
 class Reviewer(BaseAgent):
     name = "Reviewer"
     emoji = "🛡️"
-    role_summary = "Statically validates fix scripts for safety and completeness."
+    role_summary = "Runs the static safety validator, then issues the final verdict via LLM."
     allowed_tools = ("validate_fix_safety",)
+
+    _VALID_VERDICTS = {v.value for v in ReviewVerdict}
 
     def run(self, session, emit):
         self._emit(emit, EventKind.AGENT_START,
                    text=f"Reviewing {len(session.fix_scripts)} fix script(s).")
 
         result = self._tool(emit, "validate_fix_safety", session.fix_scripts,
-                            summary=f"Verdict: pending")
-        verdict_str = result.get("verdict", "REJECT_INCOMPLETE")
-        verdict = ReviewVerdict(verdict_str)
-        session.review_verdict = verdict
+                            summary="Static safety analysis complete")
+        validator_verdict = result.get("verdict", "REJECT_INCOMPLETE")
         issues = result.get("issues", [])
+        issue_lines = [f"- {i['reason']} (file: {i['file']})" for i in issues]
 
-        if verdict == ReviewVerdict.APPROVE:
-            note = f"✅ APPROVE — {len(result.get('checked_files', []))} script(s) pass safety + completeness checks."
+        # The LLM issues the final verdict, grounded in the validator findings.
+        raw = self._llm(
+            system=(
+                "You are the Reviewer — the safety gate in a data-reliability team. "
+                "No fix reaches production or DataHub without your approval.\n"
+                "You are given the findings of a static SQL safety analysis. Decide "
+                "the verdict.\n"
+                "STRICT OUTPUT FORMAT: first line must be exactly one of APPROVE, "
+                "REJECT_UNSAFE, or REJECT_INCOMPLETE. Then 1-2 sentences explaining "
+                "your reasoning.\n"
+                "Rules: any unsafe SQL pattern (DROP TABLE, TRUNCATE, DELETE without "
+                "WHERE, GRANT ALL) → REJECT_UNSAFE. Missing BEGIN/COMMIT or missing "
+                "verification step → REJECT_INCOMPLETE. No findings → APPROVE. "
+                "Never approve a script the analysis flagged as unsafe."
+            ),
+            user=(
+                f"Static analysis verdict suggestion: {validator_verdict}\n"
+                f"Findings ({len(issues)}):\n"
+                + ("\n".join(issue_lines) or "- none — all checks passed")
+                + f"\nFiles checked: {result.get('checked_files', [])}"
+            ),
+        )
+
+        first_line = raw.strip().splitlines()[0].strip().upper().rstrip(".:")
+        if first_line in self._VALID_VERDICTS:
+            verdict = ReviewVerdict(first_line)
         else:
-            issue_lines = [f"  • {i['reason']} ({i['file']})" for i in issues]
-            note = f"❌ {verdict.value} — {len(issues)} issue(s):\n" + "\n".join(issue_lines)
+            # LLM broke the output contract — fall back to the validator's
+            # verdict so the safety gate still holds (never weaker than static).
+            logger.warning(f"Reviewer LLM output had no valid verdict line: {raw[:120]!r}. "
+                           f"Using validator verdict {validator_verdict}.")
+            verdict = ReviewVerdict(validator_verdict)
 
-        session.review_notes = note
+        # Safety invariant: the LLM may be stricter than the validator but
+        # never more lenient — an unsafe finding can't be talked away.
+        if validator_verdict != "APPROVE" and verdict == ReviewVerdict.APPROVE:
+            logger.warning("Reviewer LLM tried to approve over validator rejection — overruled.")
+            verdict = ReviewVerdict(validator_verdict)
+
+        session.review_verdict = verdict
+        session.review_notes = raw
         session.reviewer_feedback = "; ".join(i["reason"] for i in issues) if issues else ""
 
-        if session.llm_enabled:
-            issue_reasons = "\n".join(f"- {i['reason']}" for i in issues) or "none"
-            narrative = self._narrate(
-                system=(
-                    "You are the Reviewer in a data-reliability team — the safety gate "
-                    "before any fix is applied. In 2 sentences, state the verdict "
-                    "(APPROVE / REJECT) and the top reason. Be direct."
-                ),
-                user=f"Verdict: {verdict.value}. Issues:\n{issue_reasons}",
-                fallback=note,
-            )
-        else:
-            narrative = note
-
-        self._emit(emit, EventKind.AGENT_MESSAGE, text=narrative)
+        self._emit(emit, EventKind.AGENT_MESSAGE, text=raw)
         self._emit(emit, EventKind.REVIEW_VERDICT, text=verdict.value,
                    data={"verdict": verdict.value, "issues": issues})
         self._emit(emit, EventKind.AGENT_COMPLETE, text=f"Verdict issued: {verdict.value}")
@@ -466,7 +440,7 @@ class Reviewer(BaseAgent):
         output = AgentOutput(
             agent=self.name,
             status="success" if verdict == ReviewVerdict.APPROVE else "needs_revision",
-            summary=narrative,
+            summary=raw,
             findings={"verdict": verdict.value, "n_issues": len(issues)},
         )
         session.review_output = output

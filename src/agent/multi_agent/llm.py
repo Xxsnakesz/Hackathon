@@ -1,21 +1,18 @@
 """
-Provider-agnostic narrator with deterministic fallback.
+Provider-agnostic LLM narrator — REQUIRED for the multi-agent team.
 
 Providers, in order of preference (first one whose key is set wins):
 
-  1. OpenAI     — requires OPENAI_API_KEY   (default; user has a GPT key)
+  1. OpenAI     — requires OPENAI_API_KEY (supports OPENAI_BASE_URL gateways)
   2. Anthropic  — requires ANTHROPIC_API_KEY
-  3. None       — deterministic templates only (demo still completes end-to-end)
 
-The wrapper prefers the LangChain adapters (`langchain_openai.ChatOpenAI`,
-`langchain_anthropic.ChatAnthropic`) so we get the same message contract
-regardless of provider — this is what LangGraph nodes want too. If LangChain
-isn't installed, we fall back to the raw SDK for OpenAI (openai package),
-and if neither is available we go deterministic silently.
+There is no deterministic fallback: every agent's reasoning text comes from
+the LLM. If no provider is configured, the orchestrator refuses to start and
+the UI tells the user to set a key.
 
-Tool execution is ALWAYS deterministic (see tools.py). The narrator only
-produces natural-language commentary; it never invents drift data, lineage,
-or fix scripts.
+Tool execution stays in code (see tools.py) — the LLM reasons over real tool
+output; it never fabricates drift data, lineage, or SQL. But all narrative
+and the reviewer's final verdict are genuine LLM output.
 """
 from __future__ import annotations
 
@@ -27,6 +24,10 @@ logger = logging.getLogger("MultiAgent.LLM")
 
 _DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 _DEFAULT_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
+
+
+class NarratorError(RuntimeError):
+    """Raised when the LLM is unavailable or a call fails after retries."""
 
 
 def detect_provider() -> str:
@@ -130,52 +131,60 @@ class Narrator:
         return self._client is not None
 
     # ── main call ────────────────────────────────────────────────────
-    def narrate(self, system: str, user: str, fallback: str) -> str:
+    def narrate(self, system: str, user: str, retries: int = 2) -> str:
+        """
+        Ask the LLM for a response. Retries transient failures once, then
+        raises NarratorError — there is no template fallback by design.
+        """
         if self._client is None:
-            return fallback
-        try:
-            if self._impl == "langchain-openai" or self._impl == "langchain-anthropic":
-                from langchain_core.messages import SystemMessage, HumanMessage
-                resp = self._client.invoke([
-                    SystemMessage(content=system),
-                    HumanMessage(content=user),
-                ])
-                out = (resp.content if isinstance(resp.content, str)
-                       else "".join(p.get("text", "") for p in resp.content if isinstance(p, dict))).strip()
-                return out or fallback
-
-            if self._impl == "openai":
-                resp = self._client.chat.completions.create(
-                    model=self.model,
-                    max_tokens=self.max_tokens,
-                    messages=[
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user},
-                    ],
+            raise NarratorError(
+                "No LLM provider configured. Set OPENAI_API_KEY (+ OPENAI_BASE_URL "
+                "for gateways like SumoPod) or ANTHROPIC_API_KEY in .env."
+            )
+        last_exc: Optional[Exception] = None
+        for attempt in range(1, retries + 1):
+            try:
+                out = self._call_once(system, user)
+                if out:
+                    return out
+                last_exc = NarratorError("LLM returned an empty response")
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(
+                    f"Narrator attempt {attempt}/{retries} failed "
+                    f"({exc.__class__.__name__}: {exc})"
                 )
-                out = (resp.choices[0].message.content or "").strip()
-                return out or fallback
+        raise NarratorError(f"LLM call failed after {retries} attempt(s): {last_exc}")
 
-            if self._impl == "anthropic":
-                resp = self._client.messages.create(
-                    model=self.model,
-                    max_tokens=self.max_tokens,
-                    system=system,
-                    messages=[{"role": "user", "content": user}],
-                )
-                parts = [b.text for b in resp.content if getattr(b, "type", "") == "text"]
-                out = "".join(parts).strip()
-                return out or fallback
+    def _call_once(self, system: str, user: str) -> str:
+        if self._impl in ("langchain-openai", "langchain-anthropic"):
+            from langchain_core.messages import SystemMessage, HumanMessage
+            resp = self._client.invoke([
+                SystemMessage(content=system),
+                HumanMessage(content=user),
+            ])
+            return (resp.content if isinstance(resp.content, str)
+                    else "".join(p.get("text", "") for p in resp.content if isinstance(p, dict))).strip()
 
-        except Exception as exc:
-            logger.warning(f"Narrator call failed ({exc.__class__.__name__}: {exc}). Falling back.")
+        if self._impl == "openai":
+            resp = self._client.chat.completions.create(
+                model=self.model,
+                max_tokens=self.max_tokens,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+            )
+            return (resp.choices[0].message.content or "").strip()
 
-        return fallback
+        if self._impl == "anthropic":
+            resp = self._client.messages.create(
+                model=self.model,
+                max_tokens=self.max_tokens,
+                system=system,
+                messages=[{"role": "user", "content": user}],
+            )
+            parts = [b.text for b in resp.content if getattr(b, "type", "") == "text"]
+            return "".join(parts).strip()
 
-
-# ─────────────────────────────────────────────────────────────────────
-# Back-compat alias — the previous version exported ClaudeNarrator.
-# ─────────────────────────────────────────────────────────────────────
-class ClaudeNarrator(Narrator):
-    def __init__(self, model: Optional[str] = None, max_tokens: int = 400):
-        super().__init__(provider="anthropic", model=model, max_tokens=max_tokens)
+        raise NarratorError(f"Unknown narrator implementation: {self._impl}")

@@ -215,7 +215,7 @@ Detector
 - **Enforced tool separation.** Detector *cannot* generate fixes; FixAuthor *cannot* tag DataHub. Each agent's `allowed_tools` list is enforced by the tool registry before every call.
 - **The Reviewer can veto.** If a generated SQL contains `DROP TABLE`, `TRUNCATE`, `DELETE` without `WHERE`, missing `BEGIN`/`COMMIT`, or no verification step, the Reviewer returns `REJECT_UNSAFE` / `REJECT_INCOMPLETE` and the graph routes back to the FixAuthor with the rejection reason. Bounded by `max_review_iterations`.
 - **Write-back is gated.** DataHub tagging only happens when the Reviewer approves. Rejected fixes exit through `writeback_skip → END` — they never touch the graph.
-- **LLM narration is optional + provider-agnostic.** Set `OPENAI_API_KEY` (default) or `ANTHROPIC_API_KEY` and each agent narrates its findings in natural language via GPT / Claude. Without either, every agent still runs end-to-end using deterministic templates. **Tool logic is always deterministic** — the LLM only produces commentary text; it never invents drift data, lineage, or SQL.
+- **Pure LLM reasoning, provider-agnostic.** Every agent's analysis — and the Reviewer's final verdict — is genuine LLM output. Set `OPENAI_API_KEY` (default; supports `OPENAI_BASE_URL` gateways like SumoPod) or `ANTHROPIC_API_KEY`. **Tools run in code** — schema scans, lineage reads, and SQL validation execute deterministically, and the LLM reasons over that real output; it can never fabricate drift data, lineage, or SQL. A static safety validator additionally guarantees the LLM Reviewer can never approve a script flagged as unsafe.
 
 **Try it:** open the Streamlit tab **🧠 Multi-Agent Team** and click *Dispatch Team*. Every agent's tool calls, reasoning, and the reviewer verdict stream live.
 
@@ -283,7 +283,7 @@ Reference implementations:
 │   │       ├── agents.py                 #   Detector / Analyst / Assessor / Author / Reviewer
 │   │       ├── tools.py                  #   Deterministic tool registry (enforced separation)
 │   │       ├── orchestrator.py           #   Streaming coordinator + DataHub write-back gate
-│   │       ├── llm.py                    #   Claude narrator with deterministic fallback
+│   │       ├── llm.py                    #   Provider-agnostic LLM client (OpenAI/gateways/Anthropic)
 │   │       └── types.py                  #   Events + session dataclasses
 │   │
 │   └── app/

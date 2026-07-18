@@ -622,22 +622,23 @@ with tab_team:
         "DataHub write-back only happens after the Reviewer approves."
     )
 
-    # LLM status banner
-    if llm_available():
+    # LLM status banner — pure-LLM design: a working provider is required.
+    llm_ready = llm_available()
+    if llm_ready:
         provider = detect_provider()
         provider_label = {"openai": "OpenAI", "anthropic": "Anthropic"}.get(provider, provider)
         st.markdown(
             f'<div class="alert-ok">🧠 <strong>LangGraph + {provider_label}</strong> — '
-            f'narrator model <code>{get_model_name()}</code>. '
-            f'Tool logic is always deterministic; only commentary text goes through the LLM.</div>',
+            f'model <code>{get_model_name()}</code>. Every agent reasons via the LLM '
+            f'over real tool output (schema scans, lineage, SQL validation run in code).</div>',
             unsafe_allow_html=True,
         )
     else:
         st.markdown(
-            '<div class="alert-info">🧠 <strong>LangGraph, deterministic mode</strong> — no '
-            '<code>OPENAI_API_KEY</code> or <code>ANTHROPIC_API_KEY</code> set. '
-            'Agents produce templated commentary from real tool output. '
-            'Set a key in <code>.env</code> to get LLM narration.</div>',
+            '<div class="alert-crit">🛑 <strong>LLM required</strong> — the agent team is pure LLM '
+            'and cannot run without a provider. Set <code>OPENAI_API_KEY</code> '
+            '(+ <code>OPENAI_BASE_URL</code> for gateways like SumoPod) or '
+            '<code>ANTHROPIC_API_KEY</code> in <code>.env</code>, then restart.</div>',
             unsafe_allow_html=True,
         )
 
@@ -645,15 +646,16 @@ with tab_team:
     with st.expander("📐 View LangGraph state machine"):
         try:
             ctx_preview = get_pipeline_context()
-            if ctx_preview is not None:
+            if ctx_preview is not None and llm_ready:
                 _prev = MultiAgentOrchestrator(
                     inspector=get_inspector(),
                     gms=get_datahub(),
                     ctx=ctx_preview,
-                    force_llm_disabled=True,
                 )
                 st.markdown("The 5 agents wired as a LangGraph `StateGraph` — fan-out, join, and review loop are real edges:")
                 st.code(_prev.graph_mermaid(), language="mermaid")
+            elif not llm_ready:
+                st.caption("(set an LLM key to preview the compiled graph)")
             else:
                 st.caption("(rediscover pipeline from sidebar to preview the graph)")
         except Exception as exc:
@@ -671,13 +673,7 @@ with tab_team:
     default_alert = ALERT_TEMPLATE.format(**DEMO_ALERT_VALUES)
     team_alert = st.text_area("Incident alert", value=default_alert, height=160, key="team_alert")
 
-    force_det = st.checkbox(
-        "Force deterministic (skip LLM even if key is set)",
-        value=False, key="force_det",
-        help="Useful for demo recording — makes output reproducible.",
-    )
-
-    if st.button("🚀 Dispatch Team", key="btn_team"):
+    if st.button("🚀 Dispatch Team", key="btn_team", disabled=not llm_ready):
         ctx_team = get_pipeline_context()
         if ctx_team is None:
             st.error("Cannot dispatch — no pipeline discovered from DataHub. Rediscover from the sidebar first.")
@@ -688,7 +684,6 @@ with tab_team:
                 inspector=fresh_insp,
                 gms=gms_team,
                 ctx=ctx_team,
-                force_llm_disabled=force_det,
             )
 
             stepper_slot = st.empty()

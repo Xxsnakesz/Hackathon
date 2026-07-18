@@ -162,14 +162,12 @@ def main():
     time.sleep(0.5)
     print()
 
-    # Initialize and run the multi-agent team (deterministic — no LLM key needed
-    # for the demo recording, so output is reproducible).
+    # Initialize and run the multi-agent team. Pure-LLM design — requires
+    # OPENAI_API_KEY (+ OPENAI_BASE_URL for gateways) or ANTHROPIC_API_KEY.
     gms = DatahubGmsClient()
     ctx = discover_pipeline(gms)
     inspector = PostgresSchemaInspector(pipeline_context=ctx)
-    orchestrator = MultiAgentOrchestrator(
-        inspector=inspector, gms=gms, ctx=ctx, force_llm_disabled=True,
-    )
+    orchestrator = MultiAgentOrchestrator(inspector=inspector, gms=gms, ctx=ctx)
     alert = ALERT_TEMPLATE.format(**DEMO_ALERT_VALUES)
 
     session, events = orchestrator.run(alert)

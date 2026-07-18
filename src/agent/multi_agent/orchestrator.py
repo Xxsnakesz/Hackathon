@@ -33,11 +33,12 @@ Design principles:
 
 * **Real state machine** — LangGraph makes the review loop and the fan-out
   first-class edges instead of hand-rolled control flow.
-* **Provider-agnostic narrator** — OpenAI (default when OPENAI_API_KEY is set)
-  or Anthropic. Deterministic templates take over if no key is available.
-* **Tool execution stays deterministic** — the same ToolRegistry (with per-agent
-  permission enforcement) drives every node. Only the narrative commentary
-  passes through the LLM.
+* **Pure LLM reasoning** — every agent's analysis and the reviewer's verdict
+  are genuine LLM output (OpenAI by default, incl. OPENAI_BASE_URL gateways;
+  Anthropic as alternative). No LLM key → the orchestrator refuses to start.
+* **Tools run in code** — the ToolRegistry (with per-agent permission
+  enforcement) executes schema scans, lineage reads, and SQL validation; the
+  LLM reasons over that real output and can never fabricate it.
 * **Write-back is gated** — DataHub tagging only fires when the reviewer
   approves. On REJECT the graph loops back to the author for a revision
   bounded by max_review_iterations.
@@ -70,7 +71,7 @@ from src.agent.multi_agent.agents import (
     Reviewer,
     RootCauseAnalyst,
 )
-from src.agent.multi_agent.llm import Narrator
+from src.agent.multi_agent.llm import Narrator, NarratorError
 from src.agent.multi_agent.tools import ToolRegistry
 from src.agent.multi_agent.types import (
     AgentEvent,
@@ -108,7 +109,6 @@ class MultiAgentOrchestrator:
         gms: DatahubGmsClient,
         ctx: Optional[PipelineContext] = None,
         max_review_iterations: int = 2,
-        force_llm_disabled: bool = False,
     ):
         if not _LANGGRAPH_AVAILABLE:
             raise RuntimeError(
@@ -125,10 +125,15 @@ class MultiAgentOrchestrator:
 
         self.registry = ToolRegistry(inspector, gms, self.ctx)
 
-        if force_llm_disabled:
-            self.narrator = Narrator(provider="none")
-        else:
-            self.narrator = Narrator()
+        # Pure-LLM design: every agent reasons via the LLM, so a working
+        # provider is a hard requirement — no deterministic fallback.
+        self.narrator = Narrator()
+        if not self.narrator.is_live():
+            raise NarratorError(
+                "Multi-agent team requires an LLM. Set OPENAI_API_KEY "
+                "(+ OPENAI_BASE_URL for gateways like SumoPod) or "
+                "ANTHROPIC_API_KEY in .env."
+            )
 
         # Instantiate agents (each holds its own allowed_tools whitelist)
         self.detector = DetectorAgent(self.registry, self.narrator)
@@ -329,11 +334,10 @@ class MultiAgentOrchestrator:
         )
 
         # Opening event so the UI has something to show immediately.
-        provider = self.narrator.provider if self.narrator.is_live() else "deterministic"
         yield AgentEvent(
             kind=EventKind.ORCHESTRATOR, agent="Orchestrator", emoji="🎬",
-            text=(f"LangGraph investigation started. Narrator: "
-                  f"{provider}{' / ' + self.narrator.model if self.narrator.is_live() else ''}."),
+            text=(f"LangGraph investigation started. LLM: "
+                  f"{self.narrator.provider} / {self.narrator.model}."),
         )
 
         initial: GraphState = {"session": session, "events": []}
