@@ -163,10 +163,14 @@ Most projects use DataHub as a passive catalog — they read from it. This proje
 | DataHub aspect | What the agent writes |
 |---|---|
 | `globalTags` | `DATA-INCIDENT: DO NOT USE` tag on every affected ML model |
-| `globalTags` | `SCHEMA-DRIFT-DETECTED` tag on every affected source table |
-| `datasetProperties` | Full incident description with what drifted, when, and by whom |
+| `globalTags` | `SCHEMA-DRIFT-DETECTED` tag on the **raw source table only** — never on a derived view sitting between it and the model (see below) |
+| `incidentInfo` (native `Incident` entity) | A first-class DataHub Incident — Active status banner, priority, associated to the impacted model — not just a tag. Falls back to a `datasetProperties.customProperties` note if the installed SDK/GMS predates the Incident entity, so the agent still works end-to-end against older DataHub deployments |
 
 All writes go through DataHub's official Python SDK (`DatahubRestEmitter`) as MetadataChangeProposal (MCP) events — the same mechanism DataHub itself uses internally.
+
+**Correctness details that matter to anyone auditing the write-back path:**
+- `datasetProperties` is a full-aspect MCP — writing it **replaces the whole aspect**, not merges. The agent always reads the entity's existing `name` first and preserves it; earlier versions of this write path accidentally overwrote the model's display name with the incident tag text. Fixed and covered by a regression test.
+- A DataHub source table can appear in an ML model's upstream lineage two ways: as the true raw table, or as a **derived view** built on top of that raw table (e.g. a `feature_engineering_table` VIEW). During pipeline discovery, the agent checks each source table's *own* upstream lineage — if it has further lineage on a source platform, it's derived and is excluded from `monitored_table_names` (schema-drift scanning and the `SCHEMA-DRIFT-DETECTED` tag only ever target the true raw table). Derived tables still show up in the lineage view for context, just not as an independent monitoring target.
 
 ---
 

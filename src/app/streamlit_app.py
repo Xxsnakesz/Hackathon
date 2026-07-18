@@ -838,6 +838,20 @@ with tab_team:
                 f'<code>{wb.get("tag","-")}</code></div>',
                 unsafe_allow_html=True,
             )
+            incident_urns = wb.get("incident_urns", {}) or {}
+            n_native = sum(1 for v in incident_urns.values() if v)
+            if n_native:
+                st.markdown(
+                    f'<div class="alert-ok">🚨 {n_native} native DataHub Incident(s) opened '
+                    f'(Active status banner on the entity page).</div>',
+                    unsafe_allow_html=True,
+                )
+            elif incident_urns:
+                st.markdown(
+                    '<div class="alert-info">🚨 Incident context recorded via tag/description '
+                    '(native Incident entity unavailable — check acryl-datahub SDK version).</div>',
+                    unsafe_allow_html=True,
+                )
         elif s.review_verdict and s.review_verdict != ReviewVerdict.APPROVE:
             st.markdown(
                 '<div class="alert-warn">🛑 DataHub write-back skipped — reviewer did not approve.</div>',

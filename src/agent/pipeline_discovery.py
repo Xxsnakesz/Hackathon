@@ -56,6 +56,14 @@ class SourceTableSpec:
     owners: list[str] = field(default_factory=list)
     columns: list[ColumnSpec] = field(default_factory=list)
     downstream_models: list[str] = field(default_factory=list)  # ML model URNs that consume this
+    is_raw_source: bool = True
+    # False when this entity itself has further upstream lineage on a
+    # source platform (e.g. a Postgres VIEW sitting on top of a raw table).
+    # Derived tables like this are informative for lineage display but must
+    # NOT be independently monitored for schema drift — their schema is a
+    # side effect of the raw table, and comparing it against a separately
+    # registered baseline produces false-positive drift unrelated to the
+    # actual root cause. See PipelineContext.monitored_table_names.
 
 
 @dataclass
@@ -83,7 +91,13 @@ class PipelineContext:
 
     @property
     def monitored_table_names(self) -> list[str]:
-        return list(self.source_tables.keys())
+        """
+        Tables eligible for schema-drift scanning: raw sources only. Derived
+        tables (views sitting on top of a raw table) are excluded here even
+        though they still appear in `source_tables` for lineage/ownership
+        display — see SourceTableSpec.is_raw_source.
+        """
+        return [t.table_name for t in self.source_tables.values() if t.is_raw_source]
 
     def critical_columns_for(self, table_name: str) -> set[str]:
         t = self.source_tables.get(table_name)
@@ -110,9 +124,10 @@ class PipelineContext:
             lines.append(f"  • {m.name} [{m.platform}] ← {len(m.upstream_tables)} upstream table(s)")
         for t in self.source_tables.values():
             crit = self.critical_columns_for(t.table_name)
+            kind = "raw source, monitored" if t.is_raw_source else "derived (view) — lineage only, not monitored"
             lines.append(
                 f"  • {t.table_name} [{t.platform}] — {len(t.columns)} cols, "
-                f"{len(crit)} critical → feeds {len(t.downstream_models)} model(s)"
+                f"{len(crit)} critical → feeds {len(t.downstream_models)} model(s) [{kind}]"
             )
         return "\n".join(lines)
 
@@ -278,6 +293,18 @@ def discover_pipeline(
             # Is this table's data actually consumed by an ML model? (yes — that's how we found it)
             is_in_ml_lineage = True
 
+            # A table is a "raw source" only if IT has no further upstream
+            # lineage on a source platform. If it does (e.g. a Postgres VIEW
+            # built on top of paysim_raw_transactions), it's derived — its
+            # schema is a side effect of the true raw table, not an
+            # independent thing an engineer directly ALTERs.
+            own_upstream = gms.get_lineage(src_urn, direction="UPSTREAM")
+            is_raw_source = not any(
+                (u.get("platform", "").lower() or _parse_platform_from_urn(u.get("urn", "")))
+                in [p.lower() for p in source_platforms]
+                for u in own_upstream
+            )
+
             columns = []
             for col_info in schema:
                 col = col_info["column"]
@@ -306,6 +333,7 @@ def discover_pipeline(
                 owners=owners,
                 columns=columns,
                 downstream_models=[model_urn],
+                is_raw_source=is_raw_source,
             )
 
     logger.info(f"✅ Discovery complete\n{ctx.summary()}")

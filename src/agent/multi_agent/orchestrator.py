@@ -179,6 +179,7 @@ class MultiAgentOrchestrator:
         n_crit = sum(1 for d in drifts if d.get("severity") == "CRITICAL")
 
         incident_tag = "DATA-INCIDENT: DO NOT USE"
+        incident_title = f"Schema drift breaks {', '.join(m['name'] for m in session.impacted_models) or 'downstream models'}"
         incident_desc = (
             f"Schema drift in {', '.join(affected_tables)}. "
             f"Columns: {', '.join(affected_columns)}. "
@@ -187,17 +188,34 @@ class MultiAgentOrchestrator:
         )
 
         tag_results: dict = {}
+        incident_urns: dict = {}
         for m in session.impacted_models:
             urn = m["urn"]
             try:
                 ok = self.gms.add_tag(urn, incident_tag)
-                self.gms.emit_incident(urn, f"[INCIDENT] {incident_tag}", incident_desc)
                 tag_results[urn] = ok
                 events.append(AgentEvent(
                     kind=EventKind.TOOL_CALL, agent="Orchestrator", emoji="🏷️",
                     text=f"Tagged {m['name']} with `{incident_tag}`.",
                     tool="datahub.add_tag",
                     tool_result_summary="ok" if ok else "failed",
+                ))
+
+                # Prefer DataHub's native Incident entity (red status banner,
+                # Active/Resolved lifecycle) — falls back to a tag-based
+                # description if the SDK/GMS doesn't support it.
+                inc_ok, incident_urn = self.gms.emit_native_incident(
+                    urn, incident_title, incident_desc,
+                    priority=0 if n_crit else 1,
+                )
+                incident_urns[urn] = incident_urn
+                events.append(AgentEvent(
+                    kind=EventKind.TOOL_CALL, agent="Orchestrator", emoji="🚨",
+                    text=(f"Opened native DataHub incident for {m['name']}."
+                          if incident_urn else
+                          f"Recorded incident context for {m['name']} (tag-based fallback)."),
+                    tool="datahub.emit_native_incident",
+                    tool_result_summary="ok" if inc_ok else "failed",
                 ))
             except Exception as exc:
                 tag_results[urn] = False
@@ -214,7 +232,7 @@ class MultiAgentOrchestrator:
                 self.gms.add_tag(src.urn, "SCHEMA-DRIFT-DETECTED")
                 events.append(AgentEvent(
                     kind=EventKind.TOOL_CALL, agent="Orchestrator", emoji="🏷️",
-                    text=f"Tagged source table `{tname}` with SCHEMA-DRIFT-DETECTED.",
+                    text=f"Tagged raw source table `{tname}` with SCHEMA-DRIFT-DETECTED.",
                     tool="datahub.add_tag",
                 ))
             except Exception as exc:
@@ -227,6 +245,7 @@ class MultiAgentOrchestrator:
             "tag": incident_tag,
             "description": incident_desc,
             "models_tagged": tag_results,
+            "incident_urns": incident_urns,
             "n_models": len(session.impacted_models),
         }
         events.append(AgentEvent(

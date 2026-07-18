@@ -409,27 +409,114 @@ class DatahubGmsClient:
 
     def emit_incident(self, urn: str, title: str, description: str) -> bool:
         """
-        Emit an incident / description update to DataHub via SDK.
+        Record an incident on the entity via the datasetProperties aspect.
+
+        IMPORTANT: a datasetProperties MCP REPLACES THE WHOLE ASPECT — it is
+        not a merge. Writing without first reading the existing name would
+        clobber the entity's real display name with the incident title. We
+        fetch the existing name/customProperties first and preserve them;
+        the incident title/status land in customProperties instead of name.
         """
         if self._emitter:
             try:
                 from datahub.emitter.mcp import MetadataChangeProposalWrapper
                 from datahub.metadata.schema_classes import DatasetPropertiesClass
 
+                entity = self.get_entity(urn)
+                existing_aspects = entity.get("_aspects", {})
+                existing_props = existing_aspects.get("datasetProperties", {}) or {}
+                existing_name = existing_props.get("name") or entity.get("name")
+                existing_custom = dict(existing_props.get("customProperties", {}) or {})
+
+                existing_custom.update({
+                    "incident_status": "ACTIVE",
+                    "incident_title": title,
+                    "agent": "AI-Data-Reliability-Agent",
+                })
+
                 mcp = MetadataChangeProposalWrapper(
                     entityUrn=urn,
                     aspect=DatasetPropertiesClass(
-                        name=title,
+                        name=existing_name,
                         description=description,
-                        customProperties={"incident_status": "ACTIVE", "agent": "AI-Data-Reliability-Agent"},
+                        customProperties=existing_custom,
                     ),
                 )
                 self._emitter.emit(mcp)
-                logger.info(f"✅ [DataHub GMS] Incident emitted for {urn}")
+                logger.info(f"✅ [DataHub GMS] Incident recorded for {urn} (name preserved: {existing_name!r})")
                 return True
             except Exception as exc:
                 logger.warning(f"Incident emit failed: {exc}")
         return False
+
+    def emit_native_incident(
+        self, urn: str, title: str, description: str,
+        priority: Optional[int] = None,
+    ) -> tuple[bool, Optional[str]]:
+        """
+        Create a first-class DataHub Incident entity (urn:li:incident:<uuid>)
+        and associate it with `urn` via the incidentInfo aspect's `entities`
+        field. This is DataHub's dedicated incident-management feature — it
+        renders as a red status banner on the entity page with an
+            Active/Resolved state, unlike a plain custom tag.
+
+        Returns (success, incident_urn_or_None). Falls back to the tag +
+        datasetProperties approach (emit_incident) if the installed
+        acryl-datahub SDK predates the Incident entity classes, or if the
+        emit itself fails for any reason — the agent must keep working
+        end-to-end even against an older DataHub deployment.
+        """
+        if self._emitter:
+            try:
+                import uuid
+                from datahub.emitter.mcp import MetadataChangeProposalWrapper
+                from datahub.metadata.schema_classes import (
+                    AuditStampClass,
+                    IncidentInfoClass,
+                    IncidentSourceClass,
+                    IncidentSourceTypeClass,
+                    IncidentStateClass,
+                    IncidentStatusClass,
+                    IncidentTypeClass,
+                )
+
+                incident_urn = f"urn:li:incident:{uuid.uuid4()}"
+                now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+                actor = "urn:li:corpuser:ai-data-reliability-agent"
+
+                incident_info = IncidentInfoClass(
+                    type=IncidentTypeClass.OPERATIONAL,
+                    title=title,
+                    description=description,
+                    entities=[urn],
+                    status=IncidentStatusClass(
+                        state=IncidentStateClass.ACTIVE,
+                        message="Detected by AI Data Reliability Agent — schema drift breaks downstream ML inference.",
+                        lastUpdated=AuditStampClass(time=now_ms, actor=actor),
+                    ),
+                    source=IncidentSourceClass(type=IncidentSourceTypeClass.MANUAL),
+                    priority=priority,
+                    created=AuditStampClass(time=now_ms, actor=actor),
+                )
+
+                mcp = MetadataChangeProposalWrapper(
+                    entityUrn=incident_urn,
+                    entityType="incident",
+                    aspect=incident_info,
+                )
+                self._emitter.emit(mcp)
+                logger.info(f"✅ [DataHub GMS] Native incident {incident_urn} created for {urn}")
+                return True, incident_urn
+            except ImportError as exc:
+                logger.info(
+                    f"Native Incident classes unavailable in this acryl-datahub "
+                    f"version ({exc}) — falling back to tag-based incident marking."
+                )
+            except Exception as exc:
+                logger.warning(f"Native incident emit failed ({exc}) — falling back to tag-based incident marking.")
+
+        ok = self.emit_incident(urn, title, description)
+        return ok, None
 
     def get_all_tags(self, urn: str) -> list:
         entity = self.get_entity(urn)
