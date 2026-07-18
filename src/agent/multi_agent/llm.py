@@ -68,6 +68,11 @@ class Narrator:
         self.provider = provider or detect_provider()
         self.model = model or get_model_name(self.provider)
         self.max_tokens = max_tokens
+        # OpenAI-compatible gateways (SumoPod, Azure-style proxies, local
+        # vLLM/Ollama, etc.) need an explicit base_url — the OpenAI SDK
+        # defaults to api.openai.com otherwise, which silently 401s/404s
+        # against a key that was actually issued for a different gateway.
+        self.base_url = os.environ.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_API_BASE")
         self._client = None
         self._impl = "none"
 
@@ -80,17 +85,25 @@ class Narrator:
     def _init_openai(self):
         try:
             from langchain_openai import ChatOpenAI
-            self._client = ChatOpenAI(model=self.model, max_tokens=self.max_tokens)
+            kwargs = {"model": self.model, "max_tokens": self.max_tokens}
+            if self.base_url:
+                kwargs["base_url"] = self.base_url
+            self._client = ChatOpenAI(**kwargs)
             self._impl = "langchain-openai"
-            logger.info(f"Narrator: langchain-openai / {self.model}")
+            logger.info(f"Narrator: langchain-openai / {self.model}"
+                        + (f" @ {self.base_url}" if self.base_url else ""))
             return
         except Exception as exc:
             logger.info(f"langchain-openai unavailable ({exc}); trying raw openai SDK.")
         try:
             import openai
-            self._client = openai.OpenAI()
+            kwargs = {}
+            if self.base_url:
+                kwargs["base_url"] = self.base_url
+            self._client = openai.OpenAI(**kwargs)
             self._impl = "openai"
-            logger.info(f"Narrator: openai SDK / {self.model}")
+            logger.info(f"Narrator: openai SDK / {self.model}"
+                        + (f" @ {self.base_url}" if self.base_url else ""))
         except Exception as exc:
             logger.warning(f"OpenAI provider requested but no client available: {exc}")
             self._client = None
