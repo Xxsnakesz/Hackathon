@@ -1,8 +1,28 @@
 # 🤖 AI Data Reliability Agent
 
+### The bug that doesn't crash your model — it just makes it wrong, silently, for hours.
+
 > **DataHub Agent Hackathon 2026** — Category: Production ML Agents
 
-**In one sentence:** an autonomous agent that watches your production ML pipelines through DataHub, catches when someone accidentally breaks the data feeding those models, and posts an incident report back into DataHub so the next person (or agent) knows what happened.
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB)](requirements.txt)
+[![Built on DataHub](https://img.shields.io/badge/Built%20on-DataHub-1890FF)](https://datahubproject.io)
+[![LangGraph Multi-Agent](https://img.shields.io/badge/Orchestration-LangGraph-6E56CF)](src/agent/multi_agent/orchestrator.py)
+[![Pure LLM Reasoning](https://img.shields.io/badge/Reasoning-Pure%20LLM-C4B5FD)](src/agent/multi_agent/llm.py)
+
+**In one sentence:** a 5-agent LangGraph team that reads DataHub's lineage graph to know exactly what to protect, catches the schema change that silently poisons your fraud model, reasons about root cause and business impact like a senior SRE, picks a repair strategy from a vetted playbook, votes on whether it's safe to ship — and only then writes the incident back into DataHub so the next person (or agent) inherits the knowledge.
+
+**60-second pitch for judges:**
+
+| If you only read one row per section, read these | |
+|---|---|
+| 🎯 **The problem** | A schema drift model-poisoning bug is invisible — no stack trace, no crash, just a model quietly making worse decisions. Teams find out from a business metric days later. |
+| 🧠 **The idea** | DataHub already knows the whole pipeline graph (what feeds what, who owns it, what's critical). This agent turns that graph into an active immune system instead of a passive catalog — read the graph, reason over it, act on it, write the outcome back. |
+| ⚙️ **The technical bet** | Not "an LLM wrapper around SQL." A **LangGraph state machine**, 5 specialised agents with hard tool-permission boundaries, a safety gate that can *veto* the LLM's own output, and a fixed playbook of remediation strategies the LLM selects from — never freehand SQL. |
+| 🔁 **The DataHub round-trip** | Reads 6 aspects to build its map, writes back a first-class native `Incident` entity (not just a tag) — gated so nothing reaches DataHub until a Reviewer agent signs off. |
+| 🏁 **Try it in one click** | Streamlit tab **🧠 Multi-Agent Team** → *Dispatch Team* → watch 5 agents reason live, in order, with a visible safety veto if the fix is unsafe. |
+
+**Jump to:** [The Problem](#-the-problem-in-plain-english) · [What It Does](#-what-this-project-does) · [Demo Walkthrough](#-try-the-demo-step-by-step) · [Quick Start](#-quick-start) · [DataHub Read/Write](#-how-this-uses-datahub-reading-writing) · [What's Original](#-what-makes-this-original) · [Multi-Agent Team](#-multi-agent-investigation-team) · [Why the LLM Doesn't Write SQL](#-why-the-llm-doesnt-generate-sql-directly) · [Judging Criteria](#-judging-criteria-alignment)
 
 ---
 
@@ -384,6 +404,14 @@ If you'd like the architectural picture:
 | `paysim-postgres` | Application database with the sample data |
 
 This is not overkill — it's the minimum DataHub itself requires for production-grade operation. The point is that the agent runs against **real DataHub**, not a mock.
+
+---
+
+## 💬 The Pitch, One More Time
+
+Most hackathon "AI agents" are a system prompt wrapped around an API call. Ask this one "why not just a Python script?" and the honest answer isn't defensive — it's the whole design: **a Python script can't read a commit-message-style audit reason and infer intent, can't synthesize a lineage graph plus ownership plus glossary into a business-impact sentence, and can't weigh which of three remediation strategies actually fits a given drift.** That's reasoning, not lookup — which is exactly the work delegated to the LLM here, and *only* that work. Everything that touches production — the schema scan, the lineage query, the SQL that gets written, the safety check that can veto it — runs as ordinary, auditable, testable code.
+
+DataHub built the graph. This agent is what happens when something actually **uses** it — not to browse metadata, but to decide, act, and leave a trail the next person (or agent) can pick up.
 
 ---
 
