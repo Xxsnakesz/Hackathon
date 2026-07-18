@@ -200,54 +200,36 @@ div[data-testid="stMarkdownContainer"] { color:#cbd5e1; }
 .stTextInput input { background:#0a0f1a!important; color:#e2e8f0!important; border:1px solid rgba(255,255,255,.1)!important; }
 .stDataFrame { background:transparent; }
 
-/* ── Multi-Agent bubbles ── */
-.agent-header {
-    display:flex; align-items:center; gap:10px; padding:10px 14px;
-    border-radius:10px 10px 0 0; font-weight:600; font-size:.92rem;
-    color:#e2e8f0;
-    background:linear-gradient(90deg,var(--agent-tint,#1e293b) 0%,rgba(30,41,59,.4) 100%);
-    border:1px solid rgba(255,255,255,.08); border-bottom:none;
-}
-.agent-bubble {
-    background:rgba(15,23,42,.65);
+/* ── Multi-Agent stepper ── */
+.stepper-wrap {
+    background:rgba(255,255,255,.025);
     border:1px solid rgba(255,255,255,.08);
-    border-top:none; border-radius:0 0 10px 10px;
-    padding:12px 16px 14px; margin-bottom:14px;
-    color:#cbd5e1; font-size:.88rem; line-height:1.55;
-    white-space:pre-wrap;
+    border-radius:14px; padding:14px 18px; margin-bottom:18px;
+    display:flex; align-items:center; flex-wrap:wrap; gap:0;
 }
-.agent-detector    { --agent-tint:rgba(59,130,246,.22); }
-.agent-analyst     { --agent-tint:rgba(168,85,247,.22); }
-.agent-assessor    { --agent-tint:rgba(234,179,8,.22); }
-.agent-author      { --agent-tint:rgba(16,185,129,.22); }
-.agent-reviewer    { --agent-tint:rgba(244,63,94,.22); }
-.agent-orchestrator{ --agent-tint:rgba(148,163,184,.18); }
-
-.tool-chip {
-    display:inline-block; margin:3px 6px 3px 0;
-    padding:3px 10px; border-radius:14px;
-    font-family:'JetBrains Mono',monospace; font-size:.72rem;
-    background:rgba(51,65,85,.5); color:#94a3b8;
-    border:1px solid rgba(255,255,255,.06);
-}
-.tool-chip.result { background:rgba(6,78,59,.35); color:#6ee7b7; border-color:rgba(16,185,129,.3); }
-.verdict-banner {
-    padding:14px 20px; border-radius:12px; margin:14px 0;
-    font-weight:700; font-size:1.05rem; text-align:center;
-    border:1px solid transparent;
-}
-.verdict-approve { background:rgba(6,78,59,.45); color:#6ee7b7; border-color:#10b981; }
-.verdict-reject  { background:rgba(127,29,29,.45); color:#fca5a5; border-color:#ef4444; }
-.agent-chip-row { display:flex; gap:8px; flex-wrap:wrap; margin:8px 0 18px; }
 .agent-chip {
-    padding:5px 12px; border-radius:16px; font-size:.78rem; font-weight:600;
+    display:inline-flex; align-items:center; gap:6px;
+    padding:6px 13px; border-radius:20px; font-size:.8rem; font-weight:600;
     border:1px solid rgba(255,255,255,.1);
     background:rgba(30,41,59,.6); color:#94a3b8;
+    white-space:nowrap;
 }
 .agent-chip.done    { background:rgba(6,78,59,.5); color:#6ee7b7; border-color:#10b981; }
 .agent-chip.running { background:rgba(59,130,246,.35); color:#93c5fd; border-color:#3b82f6; animation:pulse 1.4s ease-in-out infinite; }
-.agent-chip.pending { opacity:.5; }
+.agent-chip.pending { opacity:.45; }
+.stepper-arrow { color:#475569; font-size:.9rem; margin:0 8px; flex-shrink:0; }
 @keyframes pulse { 0%,100% { opacity:1 } 50% { opacity:.55 } }
+
+/* ── Parallel-branch divider ── */
+.parallel-label {
+    display:flex; align-items:center; gap:8px;
+    font-size:.78rem; font-weight:700; letter-spacing:.04em; text-transform:uppercase;
+    color:#a78bfa; margin:6px 0 8px;
+}
+.parallel-label::after {
+    content:""; flex:1; height:1px;
+    background:linear-gradient(90deg,rgba(167,139,250,.5),transparent);
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -612,10 +594,13 @@ _AGENT_META = {
 }
 
 
-def _render_agent_chips(active: str, done: set[str]):
-    order = ["Detector", "RootCauseAnalyst", "ImpactAssessor", "FixAuthor", "Reviewer"]
-    chips = []
-    for name in order:
+_STEP_ORDER = ["Detector", "RootCauseAnalyst", "ImpactAssessor", "FixAuthor", "Reviewer"]
+
+
+def _render_stepper(active: str, done: set[str]) -> str:
+    """Compact horizontal wizard showing where the investigation currently is."""
+    parts = []
+    for i, name in enumerate(_STEP_ORDER):
         meta = _AGENT_META[name]
         if name in done:
             cls = "done"
@@ -623,28 +608,10 @@ def _render_agent_chips(active: str, done: set[str]):
             cls = "running"
         else:
             cls = "pending"
-        chips.append(
-            f'<span class="agent-chip {cls}">{meta["emoji"]} {name}</span>'
-        )
-    return f'<div class="agent-chip-row">{"".join(chips)}</div>'
-
-
-def _render_bubble(agent: str, message: str, tool_lines: list[str]) -> str:
-    meta = _AGENT_META.get(agent, _AGENT_META["Orchestrator"])
-    tools_html = ""
-    if tool_lines:
-        tools_html = "<div style='margin-top:8px'>" + "".join(tool_lines) + "</div>"
-    # Escape angle brackets in message to avoid HTML injection breaking layout
-    safe_msg = message.replace("<", "&lt;").replace(">", "&gt;")
-    return (
-        f'<div class="agent-header {meta["css"]}">'
-        f'<span style="font-size:1.15rem">{meta["emoji"]}</span>'
-        f'<span>{agent}</span>'
-        f'<span style="color:#94a3b8;font-weight:400;font-size:.78rem;margin-left:6px">'
-        f'· {meta["role"]}</span>'
-        f'</div>'
-        f'<div class="agent-bubble">{safe_msg}{tools_html}</div>'
-    )
+        parts.append(f'<span class="agent-chip {cls}">{meta["emoji"]} {name}</span>')
+        if i < len(_STEP_ORDER) - 1:
+            parts.append('<span class="stepper-arrow">→</span>')
+    return f'<div class="stepper-wrap">{"".join(parts)}</div>'
 
 
 with tab_team:
@@ -724,28 +691,26 @@ with tab_team:
                 force_llm_disabled=force_det,
             )
 
-            chip_slot = st.empty()
-            stream_slot = st.container()
+            stepper_slot = st.empty()
+            feed = st.container()
+
+            def render_stepper(active: str, done: set[str]):
+                stepper_slot.markdown(_render_stepper(active, done), unsafe_allow_html=True)
 
             done_agents: set[str] = set()
             active_agent: str = ""
-            # Aggregate events per agent turn so we render one bubble per turn.
-            current_bubble: dict = {"agent": None, "message": "", "tools": []}
-            rendered_html: list[str] = []
-            verdict_html: str = ""
-            iteration_seen: int = 0
+            render_stepper(active_agent, done_agents)
 
-            def flush_bubble():
-                if current_bubble["agent"] and current_bubble["message"]:
-                    rendered_html.append(
-                        _render_bubble(
-                            current_bubble["agent"],
-                            current_bubble["message"],
-                            current_bubble["tools"],
-                        )
-                    )
-
+            # Each agent's turn lives in its own st.status(...) box — the box
+            # auto-collapses with a ✓/spinner icon on completion, so the feed
+            # stays scannable instead of one giant growing wall of text.
+            status_boxes: dict = {}
+            parallel_cols_created = False
+            col_assessor = col_author = None
+            author_revision_count = 0
+            reviewer_round = 0
             session_result = None
+
             gen = orchestrator.stream(team_alert)
             try:
                 while True:
@@ -754,64 +719,98 @@ with tab_team:
                     except StopIteration as stop:
                         session_result = stop.value
                         break
-                    if evt.kind == EventKind.AGENT_START:
-                        flush_bubble()
-                        current_bubble = {"agent": evt.agent, "message": "", "tools": []}
-                        active_agent = evt.agent
-                    elif evt.kind == EventKind.TOOL_CALL:
-                        current_bubble["tools"].append(
-                            f'<span class="tool-chip">🔧 {evt.tool or evt.text}</span>'
-                        )
-                    elif evt.kind == EventKind.TOOL_RESULT:
-                        if evt.tool_result_summary:
-                            current_bubble["tools"].append(
-                                f'<span class="tool-chip result">← {evt.tool_result_summary}</span>'
-                            )
-                    elif evt.kind == EventKind.AGENT_MESSAGE:
-                        current_bubble["message"] = evt.text
-                    elif evt.kind == EventKind.AGENT_COMPLETE:
-                        flush_bubble()
-                        done_agents.add(current_bubble["agent"])
-                        current_bubble = {"agent": None, "message": "", "tools": []}
-                        active_agent = ""
-                    elif evt.kind == EventKind.REVIEW_VERDICT:
-                        v = evt.text
-                        cls = "verdict-approve" if v == "APPROVE" else "verdict-reject"
-                        icon = "✅" if v == "APPROVE" else "❌"
-                        verdict_html = (
-                            f'<div class="verdict-banner {cls}">'
-                            f'{icon} Reviewer verdict: <strong>{v}</strong></div>'
-                        )
-                    elif evt.kind == EventKind.HANDOFF:
-                        rendered_html.append(
-                            f'<div class="alert-warn">🔁 {evt.text}</div>'
-                        )
-                    elif evt.kind == EventKind.ITERATION_START:
-                        iteration_seen += 1
-                        if iteration_seen > 1:
-                            rendered_html.append(
-                                f'<div class="alert-info">🎬 {evt.text}</div>'
-                            )
-                    elif evt.kind == EventKind.ORCHESTRATOR:
-                        rendered_html.append(
-                            f'<div class="alert-info">🎬 {evt.text}</div>'
-                        )
-                    elif evt.kind == EventKind.ERROR:
-                        rendered_html.append(
-                            f'<div class="alert-crit">⚠️ {evt.text}</div>'
-                        )
-                    elif evt.kind == EventKind.DONE:
-                        pass  # rendered by verdict banner + summary below
 
-                    # Live re-render
-                    chip_slot.markdown(
-                        _render_agent_chips(active_agent, done_agents),
-                        unsafe_allow_html=True,
-                    )
-                    stream_slot.markdown(
-                        "\n".join(rendered_html) + verdict_html,
-                        unsafe_allow_html=True,
-                    )
+                    agent = evt.agent
+                    meta = _AGENT_META.get(agent, _AGENT_META["Orchestrator"])
+
+                    if evt.kind == EventKind.ORCHESTRATOR:
+                        with feed:
+                            st.caption(f"{meta['emoji']} {evt.text}")
+
+                    elif evt.kind == EventKind.AGENT_START:
+                        active_agent = agent
+                        is_revision = agent == "FixAuthor" and evt.text.startswith("Iteration #")
+                        label = f"{meta['emoji']} **{agent}** — {evt.text}"
+
+                        # ImpactAssessor + FixAuthor run in parallel in the graph —
+                        # give them side-by-side columns instead of a single
+                        # vertical thread so it visually reads as one branch, not two.
+                        if agent == "ImpactAssessor" and not parallel_cols_created:
+                            with feed:
+                                st.markdown(
+                                    '<div class="parallel-label">⚡ Parallel branch</div>',
+                                    unsafe_allow_html=True,
+                                )
+                                col_assessor, col_author = st.columns(2)
+                            parallel_cols_created = True
+
+                        if agent == "ImpactAssessor":
+                            target = col_assessor
+                        elif agent == "FixAuthor" and not is_revision and parallel_cols_created and "FixAuthor" not in status_boxes:
+                            target = col_author
+                        elif agent == "FixAuthor" and is_revision:
+                            author_revision_count += 1
+                            with feed:
+                                st.warning(
+                                    f"🔁 Revision round {author_revision_count} — "
+                                    f"FixAuthor retrying with reviewer feedback."
+                                )
+                            target = feed
+                        elif agent == "Reviewer":
+                            reviewer_round += 1
+                            target = feed
+                        else:
+                            target = feed
+
+                        with target:
+                            status_boxes[agent] = st.status(label, expanded=True)
+
+                    elif evt.kind == EventKind.TOOL_CALL:
+                        box = status_boxes.get(agent)
+                        if box:
+                            box.write(f"🔧 `{evt.tool or evt.text}`")
+
+                    elif evt.kind == EventKind.TOOL_RESULT:
+                        box = status_boxes.get(agent)
+                        if box and evt.tool_result_summary:
+                            box.write(f"↳ {evt.tool_result_summary}")
+
+                    elif evt.kind == EventKind.AGENT_MESSAGE:
+                        box = status_boxes.get(agent)
+                        if box:
+                            box.write(evt.text)
+
+                    elif evt.kind == EventKind.AGENT_COMPLETE:
+                        box = status_boxes.get(agent)
+                        if box:
+                            box.update(
+                                label=f"{meta['emoji']} **{agent}** — done",
+                                state="complete", expanded=False,
+                            )
+                        done_agents.add(agent)
+                        active_agent = ""
+
+                    elif evt.kind == EventKind.REVIEW_VERDICT:
+                        with feed:
+                            if evt.text == "APPROVE":
+                                st.success(f"✅ Reviewer verdict: **APPROVE**")
+                            else:
+                                st.error(f"❌ Reviewer verdict: **{evt.text}**")
+
+                    elif evt.kind == EventKind.HANDOFF:
+                        pass  # covered by the "Revision round" warning above
+
+                    elif evt.kind == EventKind.ERROR:
+                        box = status_boxes.get(agent)
+                        if box:
+                            box.update(state="error")
+                        with feed:
+                            st.error(f"⚠️ {evt.text}")
+
+                    elif evt.kind == EventKind.DONE:
+                        pass  # summary panel below covers the final state
+
+                    render_stepper(active_agent, done_agents)
             except Exception as exc:
                 st.error(f"Orchestrator crashed: {exc}")
                 st.exception(exc)
@@ -826,34 +825,12 @@ with tab_team:
         st.markdown("#### 📋 Investigation Summary")
 
         c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            st.markdown(
-                f'<div class="mcard"><div class="mlbl">Drifts</div>'
-                f'<div class="mval">{s.drift_report.get("total_drifts", 0) if s.drift_report else 0}</div></div>',
-                unsafe_allow_html=True,
-            )
-        with c2:
-            st.markdown(
-                f'<div class="mcard"><div class="mlbl">Models Impacted</div>'
-                f'<div class="mval">{len(s.impacted_models)}</div></div>',
-                unsafe_allow_html=True,
-            )
-        with c3:
-            st.markdown(
-                f'<div class="mcard"><div class="mlbl">$/hour (est)</div>'
-                f'<div class="mval">${s.dollar_impact_hour:,.0f}</div></div>',
-                unsafe_allow_html=True,
-            )
-        with c4:
-            v = s.review_verdict.value if s.review_verdict else "—"
-            color = "#6ee7b7" if v == "APPROVE" else "#f87171"
-            st.markdown(
-                f'<div class="mcard"><div class="mlbl">Verdict</div>'
-                f'<div class="mval" style="color:{color};font-size:1.15rem">{v}</div></div>',
-                unsafe_allow_html=True,
-            )
+        c1.metric("Drifts", s.drift_report.get("total_drifts", 0) if s.drift_report else 0)
+        c2.metric("Models Impacted", len(s.impacted_models))
+        c3.metric("$/hour (est)", f"${s.dollar_impact_hour:,.0f}")
+        c4.metric("Verdict", s.review_verdict.value if s.review_verdict else "—")
 
-        st.markdown(f"**Fix iterations:** {s.fix_iterations}")
+        st.caption(f"Fix iterations: {s.fix_iterations}")
         if s.review_notes:
             st.markdown(f'<div class="alert-info">🛡️ {s.review_notes}</div>', unsafe_allow_html=True)
 
