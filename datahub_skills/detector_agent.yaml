@@ -1,0 +1,60 @@
+# =========================================================
+# DataHub Skill: Detector Agent
+# =========================================================
+# Part of the AI Data Reliability multi-agent team.
+# Bonus open-source contribution to the DataHub ecosystem.
+# =========================================================
+
+name: detector_agent
+version: "1.0.0"
+description: |
+  First agent in the drift-response team. Scans monitored PostgreSQL tables
+  against the baseline registered in DataHub schemaMetadata, reads the
+  schema_change_log audit trail, and produces a structured drift report that
+  downstream agents consume.
+
+author: AI Data Reliability Agent Team
+license: Apache-2.0
+
+tags: [schema-monitoring, drift-detection, multi-agent, first-responder]
+
+inputs:
+  monitored_tables:
+    type: array
+    items: { type: string }
+    description: "Tables to scan (auto-discovered from DataHub upstream lineage of ML models)."
+
+  baseline_source:
+    type: string
+    enum: [datahub_schema_metadata, schema_baseline_table, json_fallback]
+    default: datahub_schema_metadata
+
+outputs:
+  drift_report:
+    type: object
+    description: "Per-table drift records: baseline vs actual + severity."
+  audit_entries:
+    type: array
+    description: "Recent non-INFO, non-reverted entries from schema_change_log."
+  handoff_to:
+    type: string
+    default: root_cause_analyst
+
+allowed_tools: [scan_schema, read_audit_log]
+
+execution:
+  entrypoint: "src/agent/multi_agent/agents.py"
+  class: DetectorAgent
+  method: run
+  runtime: python3.10+
+
+datahub_integration:
+  reads:
+    - aspect: schemaMetadata
+      description: "Baseline column list for each monitored table."
+  writes: []
+
+separation_of_concern: |
+  This agent is deliberately read-only on DataHub. It cannot tag entities,
+  emit incidents, or generate fix scripts — those responsibilities belong
+  to later agents in the pipeline (Reviewer + Orchestrator).

@@ -73,7 +73,7 @@ class MLModelSpec:
 class PipelineContext:
     """
     Full discovered snapshot: what to monitor, why, and how it connects.
-    Passed to db_inspector, reliability_agent, and streamlit UI.
+    Passed to db_inspector, the multi_agent orchestrator, and the Streamlit UI.
     """
     ml_models: list[MLModelSpec] = field(default_factory=list)
     source_tables: dict[str, SourceTableSpec] = field(default_factory=dict)  # keyed by table_name

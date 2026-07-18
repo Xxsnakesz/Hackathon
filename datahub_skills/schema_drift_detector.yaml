@@ -128,15 +128,22 @@ outputs:
     description: "Full markdown investigation report"
 
 # ── Execution ──────────────────────────────────────────────────────────────
+# NOTE: this combined spec describes the original single-agent flow. The
+# implementation has since been superseded by a 5-agent LangGraph team — see
+# multi_agent_orchestrator.yaml and the sibling per-agent skill files
+# (detector_agent.yaml, root_cause_analyst.yaml, impact_assessor.yaml,
+# fix_author.yaml, reviewer_agent.yaml) for the current entrypoints. This
+# file is kept as the reference for the overall input/output contract.
 execution:
-  entrypoint: "src/agent/reliability_agent.py"
-  method: "ReliabilityAgent.investigate"
+  entrypoint: "src/agent/multi_agent/orchestrator.py"
+  method: "MultiAgentOrchestrator.stream"
   runtime: python3.10+
 
   dependencies:
     - psycopg2-binary>=2.9.0
     - acryl-datahub>=0.14.0
     - requests>=2.31.0
+    - langgraph>=0.2.0
 
 # ── DataHub Integration ────────────────────────────────────────────────────
 datahub_integration:

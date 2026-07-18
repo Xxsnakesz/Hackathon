@@ -38,6 +38,8 @@ An AI agent that runs in the background and does five things automatically:
 
 All this shows up in a live web dashboard so a human can watch it happen.
 
+The same investigation is *also* available as a **5-agent team** (Detector → RootCauseAnalyst → ImpactAssessor ‖ FixAuthor → Reviewer) with a **safety gate**: DataHub only gets tagged after the Reviewer approves the generated fix. See [Multi-Agent Team](#-multi-agent-investigation-team) below.
+
 ---
 
 ## 🎬 Try the Demo (Step by Step)
@@ -60,20 +62,21 @@ Go back to **📊 Schema Monitor**. The `amount` column is now red ❌. The syst
 
 Open **📋 Change History**. You can see exactly what happened, when, and who did it.
 
-### Act 4 — The agent investigates
+### Act 4 — The agent team investigates
 
-Go to **🔍 Run Investigation** and click the big button.
+Open the **🧠 Multi-Agent Team** tab and click **Dispatch Team**. Watch five specialised agents take turns:
 
-The agent:
-- Reads the audit trail
-- Traces which ML model depends on this data (through DataHub's lineage graph)
-- Counts how many transactions are affected (from real data — 50,000 rows)
-- Attaches a **🚨 DATA-INCIDENT: DO NOT USE** tag to the ML model in DataHub
-- Generates a downloadable SQL fix
+1. **🔍 Detector** scans the schema and reads the audit log.
+2. **🕵️ RootCauseAnalyst** traces the DataHub lineage and pulls owner info.
+3. **📊 ImpactAssessor** counts corrupted rows and estimates hourly business exposure.
+4. **🔧 FixAuthor** generates the SQL/dbt fixes.
+5. **🛡️ Reviewer** statically validates the fix — and if it's unsafe (e.g. contains `DROP TABLE`) rejects it, so FixAuthor tries again.
+
+Only after the Reviewer approves does the orchestrator attach the **🚨 DATA-INCIDENT: DO NOT USE** tag to the impacted ML model in DataHub. This is the safety-gate pattern data platform teams actually want in production.
 
 ### Act 5 — Proof in DataHub
 
-Open DataHub's own web UI (usually at `http://<your-server>:9002`). Search for the fraud model. You'll see the **DATA-INCIDENT** tag now attached — the agent posted it there. Anyone else on the team who checks the model in DataHub will see the warning immediately.
+Open DataHub's own web UI (usually at `http://<your-server>:9002`). Search for the fraud model. You'll see the **DATA-INCIDENT** tag now attached — the agent team posted it there. Anyone else on the team who checks the model in DataHub will see the warning immediately.
 
 ### Act 6 — Cleanup
 
@@ -177,6 +180,49 @@ DataHub already does a lot out of the box. Here's what this project adds that Da
 - **Real impact numbers, not estimates** — the agent runs actual `COUNT` queries to say "37,204 rows are now corrupted, 4.2% can be salvaged"
 - **Auto-generated fixes** — downloadable SQL `ALTER TABLE` scripts and dbt CAST patches ready to review and merge
 - **Multi-model aware** — one drift can affect several downstream ML models; the agent tags every one of them
+- **Multi-agent team with safety gate** — the same investigation can be run as a five-agent team where the Reviewer can *veto* an unsafe fix and force a revision, and DataHub write-back is only allowed after approval (details below)
+
+---
+
+## 🧠 Multi-Agent Investigation Team
+
+Beyond the single-agent 7-step investigation, the same flow is available as a **5-specialist team** with real handoffs, a review loop, and a safety gate before any DataHub write-back.
+
+| # | Agent | Role | Tool set (enforced separation of concern) |
+|---|---|---|---|
+| 1 | 🔍 **Detector** | Scan schema + audit trail | `scan_schema`, `read_audit_log` |
+| 2 | 🕵️ **RootCauseAnalyst** | Trace lineage & owners | `get_lineage`, `get_ownership` |
+| 3 | 📊 **ImpactAssessor** | Quantify rows + $/hr | `compute_impact`, `get_table_stats`, `find_impacted_models`, `estimate_dollar_impact` |
+| 4 | 🔧 **FixAuthor** | Generate SQL + dbt fixes | `generate_fix_scripts` |
+| 5 | 🛡️ **Reviewer** | Static safety gate | `validate_fix_safety` |
+
+**Handoff flow:**
+
+```
+Detector
+   └─ (drift?) → RootCauseAnalyst
+                     ├─ ImpactAssessor  ┐
+                     └─ FixAuthor       ┘ (parallel)
+                              └─ Reviewer
+                                    ├─ APPROVE → DataHub write-back → DONE
+                                    └─ REJECT  → back to FixAuthor (max 2 iterations)
+```
+
+**Built on LangGraph** — the orchestrator is a real `StateGraph`, not hand-rolled control flow. The fan-out (`analyst → assessor ‖ author`), the join (`→ reviewer`), and the review loop (`reviewer → author_revise → reviewer` on REJECT) are first-class graph edges. Click *📐 View LangGraph state machine* in the tab to see the compiled Mermaid diagram.
+
+**What makes this a real multi-agent system, not prompt theatre:**
+
+- **Enforced tool separation.** Detector *cannot* generate fixes; FixAuthor *cannot* tag DataHub. Each agent's `allowed_tools` list is enforced by the tool registry before every call.
+- **The Reviewer can veto.** If a generated SQL contains `DROP TABLE`, `TRUNCATE`, `DELETE` without `WHERE`, missing `BEGIN`/`COMMIT`, or no verification step, the Reviewer returns `REJECT_UNSAFE` / `REJECT_INCOMPLETE` and the graph routes back to the FixAuthor with the rejection reason. Bounded by `max_review_iterations`.
+- **Write-back is gated.** DataHub tagging only happens when the Reviewer approves. Rejected fixes exit through `writeback_skip → END` — they never touch the graph.
+- **LLM narration is optional + provider-agnostic.** Set `OPENAI_API_KEY` (default) or `ANTHROPIC_API_KEY` and each agent narrates its findings in natural language via GPT / Claude. Without either, every agent still runs end-to-end using deterministic templates. **Tool logic is always deterministic** — the LLM only produces commentary text; it never invents drift data, lineage, or SQL.
+
+**Try it:** open the Streamlit tab **🧠 Multi-Agent Team** and click *Dispatch Team*. Every agent's tool calls, reasoning, and the reviewer verdict stream live.
+
+Reference implementations:
+- Agents & tool separation: [`src/agent/multi_agent/agents.py`](src/agent/multi_agent/agents.py), [`src/agent/multi_agent/tools.py`](src/agent/multi_agent/tools.py)
+- Orchestrator + review loop: [`src/agent/multi_agent/orchestrator.py`](src/agent/multi_agent/orchestrator.py)
+- One YAML skill per agent for the DataHub Skills bonus criterion: [`datahub_skills/`](datahub_skills/) — `detector_agent.yaml`, `root_cause_analyst.yaml`, `impact_assessor.yaml`, `fix_author.yaml`, `reviewer_agent.yaml`, `multi_agent_orchestrator.yaml`
 
 ---
 
@@ -189,7 +235,7 @@ DataHub already does a lot out of the box. Here's what this project adds that Da
 | **Originality** | Everything listed in the "What Makes This Original" section above — none of it exists in DataHub out of the box. |
 | **Real-World Usefulness** | Silent ML failures from schema drift are a daily pain point in MLOps. This project addresses it with zero configuration — just register the pipeline in DataHub and the agent starts protecting it. |
 | **Submission Quality** | Streamlit dashboard for visual demo, this README explains everything, sample outputs in `examples/` folder so judges can review artifacts without running the code. Apache-2.0 licensed. |
-| **Bonus: Open-Source Contribution** | `datahub_skills/schema_drift_detector.yaml` defines a reusable DataHub Agent skill spec, prepared for future upstream contribution to `datahub-project/datahub`. |
+| **Bonus: Open-Source Contribution** | `datahub_skills/` contains **six** reusable DataHub Agent skill specs — one per team agent (`detector_agent.yaml`, `root_cause_analyst.yaml`, `impact_assessor.yaml`, `fix_author.yaml`, `reviewer_agent.yaml`) plus a `multi_agent_orchestrator.yaml` that captures the team handoff graph. Prepared for upstream contribution to `datahub-project/datahub`. |
 
 ---
 
@@ -216,17 +262,29 @@ DataHub already does a lot out of the box. Here's what this project adds that Da
 │   └── ingest_postgres.yaml              # DataHub auto-ingestion config
 │
 ├── datahub_skills/
-│   └── schema_drift_detector.yaml        # Reusable skill spec (bonus contribution)
+│   ├── schema_drift_detector.yaml        # Original combined skill spec
+│   ├── detector_agent.yaml               # Multi-agent team — one skill per role
+│   ├── root_cause_analyst.yaml           # (bonus open-source contribution)
+│   ├── impact_assessor.yaml
+│   ├── fix_author.yaml
+│   ├── reviewer_agent.yaml
+│   └── multi_agent_orchestrator.yaml
 │
 ├── src/
 │   ├── agent/
 │   │   ├── pipeline_discovery.py         # ★ Reads DataHub to discover what to protect
-│   │   ├── reliability_agent.py          # ★ The main agent — investigates and remediates
 │   │   ├── datahub_gms_client.py         # DataHub API client (read + write)
 │   │   ├── db_inspector.py               # PostgreSQL schema inspection + audit trail
 │   │   ├── data_seeder.py                # Loads sample data
 │   │   ├── fix_generator.py              # Generates SQL/dbt fix scripts
-│   │   └── prompts.py                    # Alert and report templates
+│   │   ├── prompts.py                    # Alert and report templates
+│   │   │
+│   │   └── multi_agent/                  # ★ 5-agent team with review loop
+│   │       ├── agents.py                 #   Detector / Analyst / Assessor / Author / Reviewer
+│   │       ├── tools.py                  #   Deterministic tool registry (enforced separation)
+│   │       ├── orchestrator.py           #   Streaming coordinator + DataHub write-back gate
+│   │       ├── llm.py                    #   Claude narrator with deterministic fallback
+│   │       └── types.py                  #   Events + session dataclasses
 │   │
 │   └── app/
 │       └── streamlit_app.py              # ★ The web dashboard

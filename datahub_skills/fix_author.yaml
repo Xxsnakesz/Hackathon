@@ -1,0 +1,56 @@
+# =========================================================
+# DataHub Skill: Fix Author Agent
+# =========================================================
+# Part of the AI Data Reliability multi-agent team.
+# =========================================================
+
+name: fix_author
+version: "1.0.0"
+description: |
+  Fourth agent (parallel branch). Generates remediation artifacts for every
+  TYPE_CHANGE drift: a transactional PostgreSQL ALTER TABLE script and a
+  matching dbt CAST patch. Each script is wrapped in BEGIN/COMMIT and
+  includes a verification step so the Reviewer can validate safety.
+  If the Reviewer rejects, this agent re-runs with the rejection reason
+  as context (up to max_review_iterations).
+
+author: AI Data Reliability Agent Team
+license: Apache-2.0
+
+tags: [code-generation, remediation, sql, dbt, multi-agent]
+
+inputs:
+  drift_report:
+    type: object
+  reviewer_feedback:
+    type: string
+    description: "Present when this is a revision iteration."
+
+outputs:
+  fix_scripts:
+    type: object
+    description: |
+      Map of "table.column" → {sql_fix_path, dbt_fix_path, sql_preview}.
+      All files land in examples/ so judges can inspect quality without
+      running the pipeline.
+  iteration:
+    type: integer
+
+allowed_tools: [generate_fix_scripts]
+
+execution:
+  entrypoint: "src/agent/multi_agent/agents.py"
+  class: FixAuthor
+  method: run
+
+datahub_integration:
+  reads: []
+  writes:
+    - artifact: SQL fix script
+      location: examples/generated_fix_<column>.sql
+    - artifact: dbt patch
+      location: examples/generated_dbt_fix_<column>.sql
+
+separation_of_concern: |
+  Cannot tag entities or write to DataHub. All artifacts are files on disk,
+  gated by the Reviewer before any DataHub write-back happens.

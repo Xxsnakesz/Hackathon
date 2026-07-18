@@ -1,0 +1,57 @@
+# =========================================================
+# DataHub Skill: Impact Assessor Agent
+# =========================================================
+# Part of the AI Data Reliability multi-agent team.
+# =========================================================
+
+name: impact_assessor
+version: "1.0.0"
+description: |
+  Third agent (parallel branch). Quantifies business impact from actual
+  transaction data — row-level COUNT queries for corrupted values, cast-back
+  feasibility, downstream ML model exposure, and a transparent hourly-loss
+  heuristic derived from lineage fan-out.
+
+author: AI Data Reliability Agent Team
+license: Apache-2.0
+
+tags: [business-impact, cost-estimation, multi-agent, financial]
+
+inputs:
+  drift_report:
+    type: object
+  affected_tables:
+    type: array
+    items: { type: string }
+
+outputs:
+  impact_metrics:
+    type: object
+    description: "Per-column: corrupted_count, corrupted_pct, castable_pct."
+  impacted_models:
+    type: array
+    description: "ML models whose upstream lineage intersects the drift set."
+  dollar_hour_estimate:
+    type: number
+    description: |
+      Transparent heuristic — not a forecast. Derived as:
+      base ($5k) * n_models * (1.5 * n_critical_drifts) * traffic_scale.
+      The dashboard clearly labels this as 'rough estimate'.
+
+allowed_tools:
+  [compute_impact, get_table_stats, find_impacted_models, estimate_dollar_impact]
+
+execution:
+  entrypoint: "src/agent/multi_agent/agents.py"
+  class: ImpactAssessor
+  method: run
+
+datahub_integration:
+  reads:
+    - aspect: upstreamLineage
+      description: "Used to determine which ML models sit downstream of drift."
+  writes: []
+
+separation_of_concern: |
+  Read-only. Cannot tag DataHub entities or generate fix scripts.
+  Runs in parallel with FixAuthor after RootCauseAnalyst.

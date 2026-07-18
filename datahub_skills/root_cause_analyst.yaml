@@ -1,0 +1,57 @@
+# =========================================================
+# DataHub Skill: Root Cause Analyst Agent
+# =========================================================
+# Part of the AI Data Reliability multi-agent team.
+# =========================================================
+
+name: root_cause_analyst
+version: "1.0.0"
+description: |
+  Second agent. Given a drift report from the Detector, traverses the DataHub
+  lineage graph upstream from every impacted ML model and joins the drift
+  with owner info + audit-trail context to produce a natural-language root-
+  cause hypothesis.
+
+author: AI Data Reliability Agent Team
+license: Apache-2.0
+
+tags: [root-cause-analysis, lineage-traversal, multi-agent]
+
+inputs:
+  drift_report:
+    type: object
+    description: "Output of DetectorAgent."
+  audit_log:
+    type: array
+    description: "Enriched with 'who / when / why' per drift."
+
+outputs:
+  root_cause:
+    type: string
+    description: "Multi-sentence hypothesis referencing real names + timestamps."
+  lineage_trace:
+    type: string
+    description: "ASCII-formatted upstream trace for every ML model."
+  handoff_to:
+    type: array
+    items: { type: string }
+    default: [impact_assessor, fix_author]
+
+allowed_tools: [get_lineage, get_ownership]
+
+execution:
+  entrypoint: "src/agent/multi_agent/agents.py"
+  class: RootCauseAnalyst
+  method: run
+
+datahub_integration:
+  reads:
+    - endpoint: "GET /relationships"
+      description: "Two-hop upstream traversal from each ML model."
+    - aspect: ownership
+      description: "Owner emails / URNs per source table."
+  writes: []
+
+separation_of_concern: |
+  Cannot execute fixes or write to DataHub. Only reads lineage + ownership.
+  Hands off to ImpactAssessor and FixAuthor in parallel.

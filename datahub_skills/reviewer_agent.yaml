@@ -1,0 +1,66 @@
+# =========================================================
+# DataHub Skill: Reviewer Agent
+# =========================================================
+# Part of the AI Data Reliability multi-agent team.
+# =========================================================
+
+name: reviewer_agent
+version: "1.0.0"
+description: |
+  Fifth and final agent — the safety gate. Statically validates every fix
+  script produced by FixAuthor before the orchestrator writes anything back
+  to DataHub. On REJECT the orchestrator loops back to FixAuthor with the
+  rejection reason; on APPROVE the DataHub write-back proceeds.
+
+author: AI Data Reliability Agent Team
+license: Apache-2.0
+
+tags: [code-review, safety-gate, multi-agent, compliance]
+
+inputs:
+  fix_scripts:
+    type: object
+  policy_profile:
+    type: string
+    enum: [strict, permissive]
+    default: strict
+
+outputs:
+  verdict:
+    type: string
+    enum: [APPROVE, REJECT_UNSAFE, REJECT_INCOMPLETE]
+  issues:
+    type: array
+    description: "Per-file list of {reason, file} the reviewer flagged."
+
+review_rules:
+  unsafe_sql_patterns:
+    - "DROP TABLE"
+    - "TRUNCATE"
+    - "DELETE FROM <table> without WHERE"
+    - "GRANT ALL"
+  completeness_requirements:
+    - "BEGIN / COMMIT wrapping"
+    - "Post-fix RAISE NOTICE verification step"
+
+allowed_tools: [validate_fix_safety]
+
+execution:
+  entrypoint: "src/agent/multi_agent/agents.py"
+  class: Reviewer
+  method: run
+
+datahub_integration:
+  reads: []
+  writes: []
+
+separation_of_concern: |
+  This agent produces a verdict only. The actual DataHub tag write-back is
+  the orchestrator's responsibility and only fires when verdict == APPROVE.
+  Rejected fixes are held for human review, never silently applied.
+
+contribution_notes: |
+  Proposed DataHub feature request derived from this skill:
+  - A "fix-review policy" aspect that data platform teams can attach to
+    high-value datasets to declare which SQL patterns are acceptable in
+    auto-generated remediation code.

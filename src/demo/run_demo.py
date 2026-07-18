@@ -27,7 +27,10 @@ import json
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, project_root)
 
-from src.agent.reliability_agent import DataHubClient, ReliabilityAgent
+from src.agent.datahub_gms_client import DatahubGmsClient
+from src.agent.db_inspector import PostgresSchemaInspector
+from src.agent.pipeline_discovery import discover_pipeline
+from src.agent.multi_agent import MultiAgentOrchestrator
 from src.agent.prompts import ALERT_TEMPLATE, DEMO_ALERT_VALUES
 
 
@@ -159,12 +162,19 @@ def main():
     time.sleep(0.5)
     print()
 
-    # Initialize and run the agent
-    datahub_client = DataHubClient(use_simulation=True)
-    agent = ReliabilityAgent(datahub_client=datahub_client)
+    # Initialize and run the multi-agent team (deterministic — no LLM key needed
+    # for the demo recording, so output is reproducible).
+    gms = DatahubGmsClient()
+    ctx = discover_pipeline(gms)
+    inspector = PostgresSchemaInspector(pipeline_context=ctx)
+    orchestrator = MultiAgentOrchestrator(
+        inspector=inspector, gms=gms, ctx=ctx, force_llm_disabled=True,
+    )
     alert = ALERT_TEMPLATE.format(**DEMO_ALERT_VALUES)
 
-    results = agent.investigate(alert)
+    session, events = orchestrator.run(alert)
+    for evt in events:
+        print(f"   [{evt.agent}] {evt.text}")
 
     pause("Showing results...", auto=True, seconds=2.0)
 
@@ -173,19 +183,24 @@ def main():
     # =========================================================================
     section_banner("✅ PHASE 4: Resolution — Automated Remediation Complete")
 
+    tag = session.datahub_writeback.get("tag", "N/A") if session.datahub_writeback else "N/A (not approved)"
+    n_models = session.datahub_writeback.get("n_models", 0) if session.datahub_writeback else 0
     print("   🏷️  DataHub Write-Back:")
-    print(f"   Tag '{results.get('tag_applied', 'N/A')}' applied to Fraud_Detection_ML_Model")
+    print(f"   Tag '{tag}' applied to {n_models} impacted model(s)")
+    print(f"   Reviewer verdict: {session.review_verdict.value if session.review_verdict else 'N/A'}")
     print()
     print("   📝 Generated Fix Scripts:")
-    fix_scripts = results.get("fix_scripts", {})
+    fix_scripts = session.fix_scripts
+    sql_fix_path = ""
     if fix_scripts:
-        for key, value in fix_scripts.items():
-            if "path" in key:
-                print(f"   • {value}")
+        for key, fs in fix_scripts.items():
+            path = fs.get("sql_fix_path", "")
+            print(f"   • {path}")
+            if not sql_fix_path:
+                sql_fix_path = path
     print()
 
     # Show the SQL fix preview
-    sql_fix_path = fix_scripts.get("sql_fix_path", "")
     if sql_fix_path and os.path.exists(sql_fix_path):
         print("   📋 SQL Fix Script Preview (first 20 lines):")
         print("   " + "─" * 50)

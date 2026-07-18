@@ -30,10 +30,13 @@ from src.agent.db_inspector import (
     DRIFT_SCENARIOS,
     _load_baseline_json,
 )
-from src.agent.reliability_agent import DataHubClient, ReliabilityAgent
+from src.agent.datahub_gms_client import DatahubGmsClient
 from src.agent.prompts import ALERT_TEMPLATE, DEMO_ALERT_VALUES
 from src.agent.data_seeder import seed_transactions, check_data_loaded
 from src.agent.pipeline_discovery import discover_pipeline, PipelineContext
+from src.agent.multi_agent import MultiAgentOrchestrator
+from src.agent.multi_agent.types import EventKind, ReviewVerdict
+from src.agent.multi_agent.llm import llm_available, get_model_name, detect_provider
 
 # =============================================================================
 # Page config
@@ -196,15 +199,64 @@ div[data-testid="stMarkdownContainer"] { color:#cbd5e1; }
 .stTextArea textarea { background:#0a0f1a!important; color:#a3e635!important; font-family:'JetBrains Mono',monospace!important; border:1px solid rgba(255,255,255,.1)!important; }
 .stTextInput input { background:#0a0f1a!important; color:#e2e8f0!important; border:1px solid rgba(255,255,255,.1)!important; }
 .stDataFrame { background:transparent; }
+
+/* ── Multi-Agent bubbles ── */
+.agent-header {
+    display:flex; align-items:center; gap:10px; padding:10px 14px;
+    border-radius:10px 10px 0 0; font-weight:600; font-size:.92rem;
+    color:#e2e8f0;
+    background:linear-gradient(90deg,var(--agent-tint,#1e293b) 0%,rgba(30,41,59,.4) 100%);
+    border:1px solid rgba(255,255,255,.08); border-bottom:none;
+}
+.agent-bubble {
+    background:rgba(15,23,42,.65);
+    border:1px solid rgba(255,255,255,.08);
+    border-top:none; border-radius:0 0 10px 10px;
+    padding:12px 16px 14px; margin-bottom:14px;
+    color:#cbd5e1; font-size:.88rem; line-height:1.55;
+    white-space:pre-wrap;
+}
+.agent-detector    { --agent-tint:rgba(59,130,246,.22); }
+.agent-analyst     { --agent-tint:rgba(168,85,247,.22); }
+.agent-assessor    { --agent-tint:rgba(234,179,8,.22); }
+.agent-author      { --agent-tint:rgba(16,185,129,.22); }
+.agent-reviewer    { --agent-tint:rgba(244,63,94,.22); }
+.agent-orchestrator{ --agent-tint:rgba(148,163,184,.18); }
+
+.tool-chip {
+    display:inline-block; margin:3px 6px 3px 0;
+    padding:3px 10px; border-radius:14px;
+    font-family:'JetBrains Mono',monospace; font-size:.72rem;
+    background:rgba(51,65,85,.5); color:#94a3b8;
+    border:1px solid rgba(255,255,255,.06);
+}
+.tool-chip.result { background:rgba(6,78,59,.35); color:#6ee7b7; border-color:rgba(16,185,129,.3); }
+.verdict-banner {
+    padding:14px 20px; border-radius:12px; margin:14px 0;
+    font-weight:700; font-size:1.05rem; text-align:center;
+    border:1px solid transparent;
+}
+.verdict-approve { background:rgba(6,78,59,.45); color:#6ee7b7; border-color:#10b981; }
+.verdict-reject  { background:rgba(127,29,29,.45); color:#fca5a5; border-color:#ef4444; }
+.agent-chip-row { display:flex; gap:8px; flex-wrap:wrap; margin:8px 0 18px; }
+.agent-chip {
+    padding:5px 12px; border-radius:16px; font-size:.78rem; font-weight:600;
+    border:1px solid rgba(255,255,255,.1);
+    background:rgba(30,41,59,.6); color:#94a3b8;
+}
+.agent-chip.done    { background:rgba(6,78,59,.5); color:#6ee7b7; border-color:#10b981; }
+.agent-chip.running { background:rgba(59,130,246,.35); color:#93c5fd; border-color:#3b82f6; animation:pulse 1.4s ease-in-out infinite; }
+.agent-chip.pending { opacity:.5; }
+@keyframes pulse { 0%,100% { opacity:1 } 50% { opacity:.55 } }
 </style>
 """, unsafe_allow_html=True)
 
 # =============================================================================
 # Session State Helpers
 # =============================================================================
-def get_datahub() -> DataHubClient:
+def get_datahub() -> DatahubGmsClient:
     if "datahub" not in st.session_state:
-        st.session_state.datahub = DataHubClient()
+        st.session_state.datahub = DatahubGmsClient()
     return st.session_state.datahub
 
 
@@ -216,7 +268,7 @@ def get_pipeline_context() -> "PipelineContext | None":
     if "pipeline_context" in st.session_state:
         return st.session_state.pipeline_context
     try:
-        gms = get_datahub()._gms
+        gms = get_datahub()
         ctx = discover_pipeline(gms)
         st.session_state.pipeline_context = ctx
         return ctx
@@ -420,7 +472,8 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("**Tech Stack**")
-    for item in ["Python 3.10+", "PostgreSQL 15", "Streamlit", "psycopg2", "DataHub SDK"]:
+    for item in ["Python 3.10+", "PostgreSQL 15", "Streamlit", "psycopg2", "DataHub SDK",
+                 "LangGraph (multi-agent)", "OpenAI / Anthropic (narrator)"]:
         st.caption(f"• {item}")
 
 
@@ -470,9 +523,9 @@ st.markdown("<br>", unsafe_allow_html=True)
 # =============================================================================
 # Tabs
 # =============================================================================
-tab_monitor, tab_investigate, tab_simulate, tab_history, tab_info = st.tabs([
+tab_monitor, tab_team, tab_simulate, tab_history, tab_info = st.tabs([
     "📊 Schema Monitor",
-    "🔍 Run Investigation",
+    "🧠 Multi-Agent Team",
     "💥 Simulate Incident",
     "📋 Change History",
     "🗺️ Lineage & Info",
@@ -547,175 +600,286 @@ with tab_monitor:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TAB 2: Run Investigation
+# TAB 2: Multi-Agent Team
 # ─────────────────────────────────────────────────────────────────────────────
-with tab_investigate:
-    st.markdown("### 🔍 Run AI Investigation")
-    st.caption(
-        "The agent scans the real DB schema, reads the audit trail from `schema_change_log`, "
-        "computes impact from actual transaction data, and generates fix scripts."
+_AGENT_META = {
+    "Detector":         {"emoji": "🔍", "css": "agent-detector",     "role": "Scans schema + audit trail"},
+    "RootCauseAnalyst": {"emoji": "🕵️", "css": "agent-analyst",      "role": "Traces lineage & owners"},
+    "ImpactAssessor":   {"emoji": "📊", "css": "agent-assessor",     "role": "Quantifies rows + $/hr"},
+    "FixAuthor":        {"emoji": "🔧", "css": "agent-author",       "role": "Generates SQL/dbt fixes"},
+    "Reviewer":         {"emoji": "🛡️", "css": "agent-reviewer",     "role": "Safety gate"},
+    "Orchestrator":     {"emoji": "🎬", "css": "agent-orchestrator", "role": "Coordinator"},
+}
+
+
+def _render_agent_chips(active: str, done: set[str]):
+    order = ["Detector", "RootCauseAnalyst", "ImpactAssessor", "FixAuthor", "Reviewer"]
+    chips = []
+    for name in order:
+        meta = _AGENT_META[name]
+        if name in done:
+            cls = "done"
+        elif name == active:
+            cls = "running"
+        else:
+            cls = "pending"
+        chips.append(
+            f'<span class="agent-chip {cls}">{meta["emoji"]} {name}</span>'
+        )
+    return f'<div class="agent-chip-row">{"".join(chips)}</div>'
+
+
+def _render_bubble(agent: str, message: str, tool_lines: list[str]) -> str:
+    meta = _AGENT_META.get(agent, _AGENT_META["Orchestrator"])
+    tools_html = ""
+    if tool_lines:
+        tools_html = "<div style='margin-top:8px'>" + "".join(tool_lines) + "</div>"
+    # Escape angle brackets in message to avoid HTML injection breaking layout
+    safe_msg = message.replace("<", "&lt;").replace(">", "&gt;")
+    return (
+        f'<div class="agent-header {meta["css"]}">'
+        f'<span style="font-size:1.15rem">{meta["emoji"]}</span>'
+        f'<span>{agent}</span>'
+        f'<span style="color:#94a3b8;font-weight:400;font-size:.78rem;margin-left:6px">'
+        f'· {meta["role"]}</span>'
+        f'</div>'
+        f'<div class="agent-bubble">{safe_msg}{tools_html}</div>'
     )
 
+
+with tab_team:
+    st.markdown("### 🧠 Multi-Agent Investigation Team")
+    st.caption(
+        "Five specialised agents investigate a drift together. Each has a **different tool set** "
+        "(separation of concern), and the Reviewer can **reject a Fix and send it back** for revision. "
+        "DataHub write-back only happens after the Reviewer approves."
+    )
+
+    # LLM status banner
+    if llm_available():
+        provider = detect_provider()
+        provider_label = {"openai": "OpenAI", "anthropic": "Anthropic"}.get(provider, provider)
+        st.markdown(
+            f'<div class="alert-ok">🧠 <strong>LangGraph + {provider_label}</strong> — '
+            f'narrator model <code>{get_model_name()}</code>. '
+            f'Tool logic is always deterministic; only commentary text goes through the LLM.</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            '<div class="alert-info">🧠 <strong>LangGraph, deterministic mode</strong> — no '
+            '<code>OPENAI_API_KEY</code> or <code>ANTHROPIC_API_KEY</code> set. '
+            'Agents produce templated commentary from real tool output. '
+            'Set a key in <code>.env</code> to get LLM narration.</div>',
+            unsafe_allow_html=True,
+        )
+
+    # Graph structure viewer
+    with st.expander("📐 View LangGraph state machine"):
+        try:
+            ctx_preview = get_pipeline_context()
+            if ctx_preview is not None:
+                _prev = MultiAgentOrchestrator(
+                    inspector=get_inspector(),
+                    gms=get_datahub(),
+                    ctx=ctx_preview,
+                    force_llm_disabled=True,
+                )
+                st.markdown("The 5 agents wired as a LangGraph `StateGraph` — fan-out, join, and review loop are real edges:")
+                st.code(_prev.graph_mermaid(), language="mermaid")
+            else:
+                st.caption("(rediscover pipeline from sidebar to preview the graph)")
+        except Exception as exc:
+            st.caption(f"(graph preview unavailable: {exc})")
+
+    # Agent roster
+    with st.expander("Meet the team", expanded=False):
+        for name, meta in _AGENT_META.items():
+            if name == "Orchestrator":
+                continue
+            st.markdown(
+                f"- {meta['emoji']} **{name}** — {meta['role']}"
+            )
+
     default_alert = ALERT_TEMPLATE.format(**DEMO_ALERT_VALUES)
-    alert_msg = st.text_area("Alert Message", value=default_alert, height=170, key="alert_txt")
+    team_alert = st.text_area("Incident alert", value=default_alert, height=160, key="team_alert")
 
-    if st.button("🔍 Run Investigation", key="btn_investigate"):
-        with st.spinner("🤖 AI Agent investigating..."):
-            fresh_insp = PostgresSchemaInspector()
-            datahub    = get_datahub()
-            agent      = ReliabilityAgent(datahub_client=datahub, db_inspector=fresh_insp)
+    force_det = st.checkbox(
+        "Force deterministic (skip LLM even if key is set)",
+        value=False, key="force_det",
+        help="Useful for demo recording — makes output reproducible.",
+    )
 
-            prog = st.progress(0, text="Step 1: Scanning DB schema vs baseline...")
-            time.sleep(0.3)
-            prog.progress(15, text="Step 2: Reading schema_change_log audit trail...")
-            time.sleep(0.3)
-            prog.progress(30, text="Step 3: Tracing DataHub lineage graph...")
-            time.sleep(0.3)
-            prog.progress(50, text="Step 4: Collecting drift events...")
-            time.sleep(0.2)
-            prog.progress(65, text="Step 5: Computing impact from transaction data...")
-            results = agent.investigate(alert_msg)
-            prog.progress(85, text="Step 6: Root cause analysis...")
-            time.sleep(0.2)
-            prog.progress(100, text="Step 7: ✅ Remediation complete!")
-            time.sleep(0.4)
-            prog.empty()
-
-        st.session_state["last_results"] = results
-
-    if "last_results" in st.session_state:
-        results = st.session_state["last_results"]
-        status  = results.get("status", "")
-
-        if status == "no_drift":
-            st.markdown(
-                '<div class="alert-ok">✅ <strong>No drift detected.</strong> '
-                'All schemas match baseline — ML model should be operating normally.</div>',
-                unsafe_allow_html=True,
-            )
+    if st.button("🚀 Dispatch Team", key="btn_team"):
+        ctx_team = get_pipeline_context()
+        if ctx_team is None:
+            st.error("Cannot dispatch — no pipeline discovered from DataHub. Rediscover from the sidebar first.")
         else:
-            drifts = results.get("drifts", [])
-            n_crit = sum(1 for d in drifts if d.get("severity") == "CRITICAL")
+            fresh_insp = PostgresSchemaInspector(pipeline_context=ctx_team)
+            gms_team = get_datahub()
+            orchestrator = MultiAgentOrchestrator(
+                inspector=fresh_insp,
+                gms=gms_team,
+                ctx=ctx_team,
+                force_llm_disabled=force_det,
+            )
+
+            chip_slot = st.empty()
+            stream_slot = st.container()
+
+            done_agents: set[str] = set()
+            active_agent: str = ""
+            # Aggregate events per agent turn so we render one bubble per turn.
+            current_bubble: dict = {"agent": None, "message": "", "tools": []}
+            rendered_html: list[str] = []
+            verdict_html: str = ""
+            iteration_seen: int = 0
+
+            def flush_bubble():
+                if current_bubble["agent"] and current_bubble["message"]:
+                    rendered_html.append(
+                        _render_bubble(
+                            current_bubble["agent"],
+                            current_bubble["message"],
+                            current_bubble["tools"],
+                        )
+                    )
+
+            session_result = None
+            gen = orchestrator.stream(team_alert)
+            try:
+                while True:
+                    try:
+                        evt = next(gen)
+                    except StopIteration as stop:
+                        session_result = stop.value
+                        break
+                    if evt.kind == EventKind.AGENT_START:
+                        flush_bubble()
+                        current_bubble = {"agent": evt.agent, "message": "", "tools": []}
+                        active_agent = evt.agent
+                    elif evt.kind == EventKind.TOOL_CALL:
+                        current_bubble["tools"].append(
+                            f'<span class="tool-chip">🔧 {evt.tool or evt.text}</span>'
+                        )
+                    elif evt.kind == EventKind.TOOL_RESULT:
+                        if evt.tool_result_summary:
+                            current_bubble["tools"].append(
+                                f'<span class="tool-chip result">← {evt.tool_result_summary}</span>'
+                            )
+                    elif evt.kind == EventKind.AGENT_MESSAGE:
+                        current_bubble["message"] = evt.text
+                    elif evt.kind == EventKind.AGENT_COMPLETE:
+                        flush_bubble()
+                        done_agents.add(current_bubble["agent"])
+                        current_bubble = {"agent": None, "message": "", "tools": []}
+                        active_agent = ""
+                    elif evt.kind == EventKind.REVIEW_VERDICT:
+                        v = evt.text
+                        cls = "verdict-approve" if v == "APPROVE" else "verdict-reject"
+                        icon = "✅" if v == "APPROVE" else "❌"
+                        verdict_html = (
+                            f'<div class="verdict-banner {cls}">'
+                            f'{icon} Reviewer verdict: <strong>{v}</strong></div>'
+                        )
+                    elif evt.kind == EventKind.HANDOFF:
+                        rendered_html.append(
+                            f'<div class="alert-warn">🔁 {evt.text}</div>'
+                        )
+                    elif evt.kind == EventKind.ITERATION_START:
+                        iteration_seen += 1
+                        if iteration_seen > 1:
+                            rendered_html.append(
+                                f'<div class="alert-info">🎬 {evt.text}</div>'
+                            )
+                    elif evt.kind == EventKind.ORCHESTRATOR:
+                        rendered_html.append(
+                            f'<div class="alert-info">🎬 {evt.text}</div>'
+                        )
+                    elif evt.kind == EventKind.ERROR:
+                        rendered_html.append(
+                            f'<div class="alert-crit">⚠️ {evt.text}</div>'
+                        )
+                    elif evt.kind == EventKind.DONE:
+                        pass  # rendered by verdict banner + summary below
+
+                    # Live re-render
+                    chip_slot.markdown(
+                        _render_agent_chips(active_agent, done_agents),
+                        unsafe_allow_html=True,
+                    )
+                    stream_slot.markdown(
+                        "\n".join(rendered_html) + verdict_html,
+                        unsafe_allow_html=True,
+                    )
+            except Exception as exc:
+                st.error(f"Orchestrator crashed: {exc}")
+                st.exception(exc)
+
+            if session_result is not None:
+                st.session_state["team_last_session"] = session_result
+
+    # ── Summary panel (if we have a completed session) ────────────────
+    if "team_last_session" in st.session_state:
+        s = st.session_state["team_last_session"]
+        st.markdown("---")
+        st.markdown("#### 📋 Investigation Summary")
+
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
             st.markdown(
-                f'<div class="alert-crit">🚨 <strong>Incident Detected!</strong> '
-                f'{len(drifts)} drift(s) found, {n_crit} CRITICAL. '
-                f'ML model reliability compromised.</div>',
+                f'<div class="mcard"><div class="mlbl">Drifts</div>'
+                f'<div class="mval">{s.drift_report.get("total_drifts", 0) if s.drift_report else 0}</div></div>',
+                unsafe_allow_html=True,
+            )
+        with c2:
+            st.markdown(
+                f'<div class="mcard"><div class="mlbl">Models Impacted</div>'
+                f'<div class="mval">{len(s.impacted_models)}</div></div>',
+                unsafe_allow_html=True,
+            )
+        with c3:
+            st.markdown(
+                f'<div class="mcard"><div class="mlbl">$/hour (est)</div>'
+                f'<div class="mval">${s.dollar_impact_hour:,.0f}</div></div>',
+                unsafe_allow_html=True,
+            )
+        with c4:
+            v = s.review_verdict.value if s.review_verdict else "—"
+            color = "#6ee7b7" if v == "APPROVE" else "#f87171"
+            st.markdown(
+                f'<div class="mcard"><div class="mlbl">Verdict</div>'
+                f'<div class="mval" style="color:{color};font-size:1.15rem">{v}</div></div>',
                 unsafe_allow_html=True,
             )
 
-            r_col1, r_col2 = st.columns(2)
+        st.markdown(f"**Fix iterations:** {s.fix_iterations}")
+        if s.review_notes:
+            st.markdown(f'<div class="alert-info">🛡️ {s.review_notes}</div>', unsafe_allow_html=True)
 
-            # Left: Drift table + root cause
-            with r_col1:
-                st.markdown("#### ⚠️ Detected Drifts")
-                import pandas as pd
-                df_drifts = pd.DataFrame([
-                    {
-                        "Table": d["table"],
-                        "Column": d["column"],
-                        "Baseline": d["baseline_type"],
-                        "Actual": d["actual_type"],
-                        "Severity": d.get("severity","?"),
-                        "Changed By": d.get("changed_by","unknown"),
-                    }
-                    for d in drifts
-                ])
-                st.dataframe(df_drifts, use_container_width=True, hide_index=True)
+        if s.datahub_writeback:
+            wb = s.datahub_writeback
+            n_ok = sum(1 for v in wb.get("models_tagged", {}).values() if v)
+            st.markdown(
+                f'<div class="alert-ok">🏷️ DataHub write-back: '
+                f'{n_ok}/{wb.get("n_models",0)} model(s) tagged with '
+                f'<code>{wb.get("tag","-")}</code></div>',
+                unsafe_allow_html=True,
+            )
+        elif s.review_verdict and s.review_verdict != ReviewVerdict.APPROVE:
+            st.markdown(
+                '<div class="alert-warn">🛑 DataHub write-back skipped — reviewer did not approve.</div>',
+                unsafe_allow_html=True,
+            )
 
-                with st.expander("🔎 Root Cause Analysis", expanded=True):
-                    st.markdown(f"```\n{results.get('root_cause','')}\n```")
-
-            # Right: Impact metrics + audit log from DB
-            with r_col2:
-                st.markdown("#### 📊 Impact Metrics (from real data)")
-                impact = results.get("impact_metrics", {})
-                ts = results.get("table_stats", {})
-
-                total_rows = ts.get("total_rows", 0)
-                if total_rows:
-                    st.markdown(
-                        f'<div class="alert-warn">'
-                        f'<strong>{total_rows:,}</strong> transactions in DB<br>'
-                        f'Fraud cases: <strong>{ts.get("fraud_rows", "?"):,}</strong> '
-                        f'({ts.get("fraud_rate_pct", "?"):.4f}%)'
-                        f'</div>',
-                        unsafe_allow_html=True,
-                    )
-                    # Per-column impact
-                    for col, cm in impact.get("columns", {}).items():
-                        if not cm.get("type_ok", True):
-                            corrupted = cm.get("corrupted_count", "?")
-                            pct = cm.get("corrupted_pct", "?")
-                            label = f"`{col}`: {corrupted:,} rows affected ({pct}%)" if isinstance(corrupted, int) else f"`{col}`: type mismatch"
-                            st.markdown(f'<div class="alert-crit">💀 {label}</div>', unsafe_allow_html=True)
-                else:
-                    st.markdown(
-                        '<div class="alert-warn">⚠️ No transaction data in DB — '
-                        'seed data to compute real impact metrics.</div>',
-                        unsafe_allow_html=True,
-                    )
-
-                st.markdown("#### 📋 Audit Trail (schema_change_log)")
-                log_entries = results.get("schema_change_log", [])
-                if log_entries:
-                    for e in log_entries[:5]:
-                        t  = e.get("changed_at", "?")
-                        if hasattr(t, "isoformat"):
-                            t = t.isoformat()
-                        st.markdown(
-                            f'<div style="padding:6px 0;border-bottom:1px solid rgba(255,255,255,.05)">'
-                            f'<span style="color:#f87171;font-family:monospace;font-size:.8rem">'
-                            f'[{t[:19]}]</span> '
-                            f'<code>{e.get("table_name","?")}.{e.get("column_name","?")}</code>: '
-                            f'<code>{e.get("old_type","?")}</code> → <code>{e.get("new_type","?")}</code><br>'
-                            f'<span style="color:#94a3b8;font-size:.78rem">By: {e.get("changed_by","?")}</span>'
-                            f'</div>',
-                            unsafe_allow_html=True,
-                        )
-                else:
-                    st.caption("No audit log entries found (drift may be from outside this system).")
-
-            st.markdown("---")
-
-            # Fix scripts
-            fix_scripts = results.get("fix_scripts", {})
-            if fix_scripts:
-                st.markdown("#### 🔧 Generated Fix Scripts")
-                for key, fs in fix_scripts.items():
-                    with st.expander(f"📄 Fix: `{key}`", expanded=False):
-                        sql_path = fs.get("sql_fix_path", "")
-                        if sql_path and os.path.exists(sql_path):
-                            with open(sql_path) as f:
-                                sql_content = f.read()
-                            st.code(sql_content, language="sql")
-                            st.download_button(
-                                label=f"⬇️ Download {os.path.basename(sql_path)}",
-                                data=sql_content,
-                                file_name=os.path.basename(sql_path),
-                                mime="text/plain",
-                                key=f"dl_{key}",
-                            )
-
-            # DataHub tag
-            tag = results.get("tag_applied", "")
-            if tag:
-                st.markdown(
-                    f'<div class="alert-info">🏷️ Tag applied to DataHub: '
-                    f'<code>{tag}</code> → <code>Fraud_Detection_ML_Model</code></div>',
-                    unsafe_allow_html=True,
-                )
-
-            # Full report
-            with st.expander("📄 Full Investigation Report"):
-                st.markdown(results.get("report", ""))
-
-            # Investigation log
-            with st.expander("🖥️ Agent Execution Log"):
-                log_text = "\n".join(
-                    f"[{e['timestamp']}] [{e['step']}]\n  {e['detail']}\n"
-                    for e in results.get("investigation_log", [])
-                )
-                st.markdown(f'<div class="logbox">{log_text}</div>', unsafe_allow_html=True)
+        if s.fix_scripts:
+            with st.expander("📄 Fix Scripts (approved by reviewer)"):
+                for key, fs in s.fix_scripts.items():
+                    st.markdown(f"**{key}** → `{fs.get('sql_fix_path','?')}`")
+                    p = fs.get("sql_fix_path", "")
+                    if p and os.path.exists(p):
+                        with open(p) as f:
+                            st.code(f.read(), language="sql")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
