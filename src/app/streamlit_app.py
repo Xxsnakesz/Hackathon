@@ -16,6 +16,9 @@ import streamlit as st
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+# Auto-refresh interval (seconds) for the Schema Monitor "Live" toggle.
+LIVE_REFRESH_SECS = 5
+
 try:
     from dotenv import load_dotenv
     load_dotenv(PROJECT_ROOT / ".env")
@@ -548,10 +551,18 @@ with tab_monitor:
             unsafe_allow_html=True,
         )
 
-    colR, _ = st.columns([1, 6])
+    colR, colL, _ = st.columns([1, 2, 4])
     with colR:
         if st.button("🔄 Refresh", key="refresh_monitor"):
             st.rerun()
+    with colL:
+        st.session_state["live_monitor"] = st.toggle(
+            "🔴 Live",
+            value=st.session_state.get("live_monitor", False),
+            help=f"Auto re-scan the live database every {LIVE_REFRESH_SECS}s.",
+        )
+    if st.session_state.get("live_monitor"):
+        st.caption(f"🟢 Live monitoring on — re-scanning every {LIVE_REFRESH_SECS}s.")
 
     st.markdown("---")
 
@@ -1264,3 +1275,12 @@ with tab_info:
                 'Use sidebar → 🌱 Seed Sample Data.</div>',
                 unsafe_allow_html=True,
             )
+
+# =============================================================================
+# Live auto-refresh — when the "🔴 Live" toggle is on, re-scan the DB on an
+# interval. A full rerun recomputes drift_report, so both the top metric cards
+# and the Schema Monitor update on their own without any manual clicking.
+# =============================================================================
+if st.session_state.get("live_monitor"):
+    time.sleep(LIVE_REFRESH_SECS)
+    st.rerun()
