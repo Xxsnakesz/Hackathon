@@ -20,16 +20,10 @@ license: Apache-2.0
 tags: [multi-agent, orchestration, ml-ops, data-reliability]
 
 inputs:
-  alert_message:
-    type: string
-    description: "Alert or trigger that starts the investigation."
   max_review_iterations:
     type: integer
     default: 2
-  force_llm_disabled:
-    type: boolean
-    default: false
-    description: "Skip LLM narration even if ANTHROPIC_API_KEY is set."
+    description: "How many times FixAuthor may revise a rejected fix before it's held for human review."
 
 outputs:
   session:

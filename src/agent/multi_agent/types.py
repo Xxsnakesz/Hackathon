@@ -79,7 +79,6 @@ class InvestigationSession:
     produces into its own field. Fields default to None/empty so the session
     remains valid at every point in the pipeline.
     """
-    alert_message: str = ""
     started_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     # DetectorAgent fills these

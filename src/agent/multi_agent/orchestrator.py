@@ -344,9 +344,8 @@ class MultiAgentOrchestrator:
     # ────────────────────────────────────────────────────────────────
     # Streaming entry point
     # ────────────────────────────────────────────────────────────────
-    def stream(self, alert_message: str) -> Generator[AgentEvent, None, InvestigationSession]:
+    def stream(self) -> Generator[AgentEvent, None, InvestigationSession]:
         session = InvestigationSession(
-            alert_message=alert_message,
             llm_enabled=self.narrator.is_live(),
             llm_model=self.narrator.model if self.narrator.is_live() else "",
             max_review_iterations=self.max_review_iterations,
@@ -391,8 +390,8 @@ class MultiAgentOrchestrator:
         return session
 
     # Non-streaming convenience — same shape as the previous version
-    def run(self, alert_message: str) -> tuple[InvestigationSession, list[AgentEvent]]:
-        gen = self.stream(alert_message)
+    def run(self) -> tuple[InvestigationSession, list[AgentEvent]]:
+        gen = self.stream()
         events: list[AgentEvent] = []
         session: Optional[InvestigationSession] = None
         try:

@@ -31,7 +31,6 @@ from src.agent.db_inspector import (
     _load_baseline_json,
 )
 from src.agent.datahub_gms_client import DatahubGmsClient
-from src.agent.prompts import ALERT_TEMPLATE, DEMO_ALERT_VALUES
 from src.agent.data_seeder import seed_transactions, check_data_loaded
 from src.agent.pipeline_discovery import discover_pipeline, PipelineContext
 from src.agent.multi_agent import MultiAgentOrchestrator
@@ -692,9 +691,6 @@ with tab_team:
                 f"- {meta['emoji']} **{name}** — {meta['role']}"
             )
 
-    default_alert = ALERT_TEMPLATE.format(**DEMO_ALERT_VALUES)
-    team_alert = st.text_area("Incident alert", value=default_alert, height=160, key="team_alert")
-
     if st.button("🚀 Dispatch Team", key="btn_team", disabled=not llm_ready):
         ctx_team = get_pipeline_context()
         if ctx_team is None:
@@ -728,7 +724,7 @@ with tab_team:
             reviewer_round = 0
             session_result = None
 
-            gen = orchestrator.stream(team_alert)
+            gen = orchestrator.stream()
             try:
                 while True:
                     try:

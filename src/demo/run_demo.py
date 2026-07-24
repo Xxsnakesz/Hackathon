@@ -31,7 +31,6 @@ from src.agent.datahub_gms_client import DatahubGmsClient
 from src.agent.db_inspector import PostgresSchemaInspector
 from src.agent.pipeline_discovery import discover_pipeline
 from src.agent.multi_agent import MultiAgentOrchestrator
-from src.agent.prompts import ALERT_TEMPLATE, DEMO_ALERT_VALUES
 
 
 def slow_print(text: str, delay: float = 0.02):
@@ -168,9 +167,8 @@ def main():
     ctx = discover_pipeline(gms)
     inspector = PostgresSchemaInspector(pipeline_context=ctx)
     orchestrator = MultiAgentOrchestrator(inspector=inspector, gms=gms, ctx=ctx)
-    alert = ALERT_TEMPLATE.format(**DEMO_ALERT_VALUES)
 
-    session, events = orchestrator.run(alert)
+    session, events = orchestrator.run()
     for evt in events:
         print(f"   [{evt.agent}] {evt.text}")
 
