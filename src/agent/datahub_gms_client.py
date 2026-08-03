@@ -264,7 +264,20 @@ class DatahubGmsClient:
                 relationships = data.get("relationships", []) or data.get("entities", [])
                 result = []
                 for rel in relationships:
-                    related_urn = rel.get("entity", {}).get("urn") or rel.get("urn", "")
+                    # GMS's /relationships response has been observed in two
+                    # shapes: `entity` as a plain URN string (the common case)
+                    # or, on some versions, a nested {"urn": "..."} object.
+                    # Handle both rather than assuming one — a wrong
+                    # assumption here previously crashed every lineage call.
+                    if isinstance(rel, str):
+                        related_urn = rel
+                    else:
+                        entity_field = rel.get("entity", rel.get("urn", ""))
+                        related_urn = (
+                            entity_field.get("urn", "")
+                            if isinstance(entity_field, dict)
+                            else (entity_field or "")
+                        )
                     if related_urn:
                         entity = self.get_entity(related_urn)
                         result.append({
