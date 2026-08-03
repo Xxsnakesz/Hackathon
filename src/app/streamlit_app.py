@@ -377,6 +377,11 @@ def render_change_log_timeline(entries: list):
         if is_reverted and e.get("reverted_at"):
             reverted_str = f' <span style="color:#10b981;font-size:.75rem">→ reverted at {e["reverted_at"]}</span>'
 
+        notes = e.get("notes")
+        note_html = (
+            f'<div style="color:#64748b;font-size:.75rem">Note: {notes}</div>' if notes else ""
+        )
+
         st.markdown(
             f'<div class="tl-entry">'
             f'<div class="tl-dot {dot_cls}"></div>'
@@ -387,7 +392,7 @@ def render_change_log_timeline(entries: list):
             f'  {badge}</div>'
             f'<div class="tl-by">By: {e.get("changed_by","unknown")} | Severity: {severity}</div>'
             f'<div class="tl-why">Reason: {e.get("change_reason","N/A")}</div>'
-            f'{"<div style=\"color:#64748b;font-size:.75rem\">Note: " + str(e.get("notes","")) + "</div>" if e.get("notes") else ""}'
+            f'{note_html}'
             f'</div>',
             unsafe_allow_html=True,
         )
