@@ -873,6 +873,11 @@ with tab_team:
             except Exception as exc:
                 st.error(f"Orchestrator crashed: {exc}")
                 st.exception(exc)
+            finally:
+                # This inspector was opened just for this dispatch — close it
+                # so a repeated Dispatch Team click doesn't leak a fresh
+                # Postgres connection every time.
+                fresh_insp.close()
 
             if session_result is not None:
                 st.session_state["team_last_session"] = session_result

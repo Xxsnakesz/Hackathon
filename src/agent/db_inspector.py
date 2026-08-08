@@ -219,6 +219,7 @@ class PostgresSchemaInspector:
                 logger.info(f"Skipping non-base-table entities (views): {skipped}")
             return filtered or candidates  # fallback if filter matched nothing
         except Exception as exc:
+            self._safe_rollback()
             logger.warning(f"Could not filter views out of monitored tables: {exc}")
             return candidates
 
@@ -252,6 +253,25 @@ class PostgresSchemaInspector:
     def mode(self) -> str:
         return self._mode
 
+    def _safe_rollback(self):
+        """
+        Roll back the current transaction after a failed query.
+
+        With autocommit=False, one failed statement leaves the connection in
+        PostgreSQL's "current transaction is aborted" state — every
+        subsequent query on that same connection fails with the same error
+        until a ROLLBACK is issued, even for completely unrelated queries.
+        Because `self._conn` is a long-lived object cached across many
+        Streamlit reruns, a single unhandled failure anywhere would silently
+        break every future read. Call this from every except block that
+        catches a query failure.
+        """
+        if self._conn:
+            try:
+                self._conn.rollback()
+            except Exception:
+                pass  # connection itself is dead; _connect() will replace it next use
+
     # ─────────────────────────────────────────────
     # Schema Inspection
     # ─────────────────────────────────────────────
@@ -282,6 +302,7 @@ class PostgresSchemaInspector:
             ]
         except Exception as exc:
             logger.error(f"Error reading schema for {table_name}: {exc}")
+            self._safe_rollback()
             self._connect()
             return []
 
@@ -346,6 +367,7 @@ class PostgresSchemaInspector:
                 for r in rows
             ]
         except Exception as exc:
+            self._safe_rollback()
             logger.warning(f"Cannot read schema_baseline from DB: {exc}. Using JSON fallback.")
             return _load_baseline_json().get(table_name, [])
 
@@ -398,6 +420,7 @@ class PostgresSchemaInspector:
                     "reverted_at", "is_reverted", "severity", "notes"]
             return [dict(zip(cols, r)) for r in rows]
         except Exception as exc:
+            self._safe_rollback()
             logger.warning(f"Cannot read schema_change_log: {exc}")
             return []
 
@@ -764,6 +787,7 @@ class PostgresSchemaInspector:
 
             cur.close()
         except Exception as exc:
+            self._safe_rollback()
             logger.error(f"Error computing impact metrics: {exc}")
             metrics["error"] = str(exc)
 
@@ -833,7 +857,12 @@ class PostgresSchemaInspector:
                 cur.execute(f"SELECT COUNT(*) FROM {table} WHERE isfraud = 1")
                 fraud_count = cur.fetchone()[0]
             except Exception:
-                pass
+                # A drifted isfraud column (e.g. cast to VARCHAR by Scenario B)
+                # makes `isfraud = 1` fail with a type-mismatch error, which
+                # poisons the transaction for every query after it — roll
+                # back so avg_amount/type_breakdown below can still run.
+                self._safe_rollback()
+                cur = self._conn.cursor()
 
             # Avg amount (only works if amount is numeric)
             avg_amount = None
@@ -841,7 +870,8 @@ class PostgresSchemaInspector:
                 cur.execute(f"SELECT ROUND(AVG(amount)::numeric, 2) FROM {table}")
                 avg_amount = float(cur.fetchone()[0] or 0)
             except Exception:
-                pass
+                self._safe_rollback()
+                cur = self._conn.cursor()
 
             # Transaction type breakdown
             type_breakdown = {}
@@ -849,7 +879,8 @@ class PostgresSchemaInspector:
                 cur.execute(f"SELECT type, COUNT(*) FROM {table} GROUP BY type ORDER BY COUNT(*) DESC")
                 type_breakdown = {r[0]: r[1] for r in cur.fetchall()}
             except Exception:
-                pass
+                self._safe_rollback()
+                cur = self._conn.cursor()
 
             cur.close()
             return {
@@ -861,6 +892,7 @@ class PostgresSchemaInspector:
                 "transaction_types": type_breakdown,
             }
         except Exception as exc:
+            self._safe_rollback()
             logger.error(f"Error fetching table stats: {exc}")
             return {"mode": "live", "error": str(exc)}
 
