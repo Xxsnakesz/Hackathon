@@ -1,75 +1,431 @@
 {
-  "status": "incident_detected",
-  "model_name": "Fraud_Detection_ML_Model",
-  "model_urn": "urn:li:mlModel:(urn:li:dataPlatform:mlflow,Fraud_Detection_ML_Model,PROD)",
-  "drift_info": {
-    "dataset_name": "paysim_raw_transactions",
-    "dataset_urn": "urn:li:dataset:(urn:li:dataPlatform:postgres,paysim_fintech.public.paysim_raw_transactions,PROD)",
+  "meta": {
+    "generated_by": "src/agent/multi_agent/orchestrator.py (MultiAgentOrchestrator)",
+    "note": "Sample output from the 5-agent LangGraph investigation team. LLM: OpenAI-compatible gateway (gpt-4o-mini). Regenerate with: python -m src.demo.run_demo (requires OPENAI_API_KEY/.env and either a live DataHub+Postgres stack or the built-in simulation fallback).",
+    "started_at": "2026-08-08T13:38:45.845736+00:00"
+  },
+  "scenario": {
+    "name": "Scenario A: ETL Refactor Gone Wrong",
+    "table": "paysim_raw_transactions",
     "column": "amount",
-    "previous_type": "DOUBLE",
-    "current_type": "STRING",
-    "change_timestamp": "2026-07-10T09:15:00Z",
-    "change_description": "Column 'amount' type changed from DOUBLE to STRING"
+    "drift": "double precision -> character varying",
+    "changed_by": "bambang_engineer",
+    "change_reason": "ETL pipeline refactor \u2014 column type changed unintentionally during migration"
   },
-  "root_cause": "The column 'amount' in upstream table 'paysim_raw_transactions' was changed from type 'DOUBLE' to 'STRING' on 2026-07-10T09:15:00Z.\n\nThis column is a CRITICAL numeric feature used by Fraud_Detection_ML_Model. When the type changed to STRING, the ML model could no longer perform mathematical operations on this feature, causing:\n  \u2022 Accuracy drop: 97.8% \u2192 42.3%\n  \u2022 False Positive Rate spike: 2.1% \u2192 78.5%\n  \u2022 Legitimate transactions blocked at 37x normal rate\n\nThe schema change was likely made by an upstream engineer without awareness of downstream ML dependencies.",
-  "tag_applied": "DATA-INCIDENT: DO NOT USE",
-  "tag_success": true,
-  "fix_scripts": {
-    "sql_fix_path": "/Users/bambangaji/Documents/Hackathon/examples/generated_fix_amount.sql",
-    "dbt_fix_path": "/Users/bambangaji/Documents/Hackathon/examples/generated_dbt_fix_amount.sql",
-    "sql_preview": "-- =============================================================================\n-- AUTO-GENERATED FIX SCRIPT by AI Data Reliability Agent\n-- Generated at: 2026-07-11 15:07:29\n-- =============================================================================\n--\n-- PROBLEM DETECTED:\n--   Table: public.paysim_raw_transactions\n--   Column: amount\n--   Current (Wrong) Type: STRING\n--   Expected (Correct) Type: DOUBLE -> DOUBLE PRECISION\n--\n-- ROOT CAUSE:\n--   An upstream engineer changed the column ty..."
+  "pipeline_context": {
+    "ml_models": [
+      "Fraud_Detection_ML_Model"
+    ],
+    "source_tables_monitored": [
+      "paysim_raw_transactions"
+    ],
+    "source_tables_all": [
+      "feature_engineering_table",
+      "paysim_raw_transactions"
+    ]
   },
-  "report": "## \ud83d\udd0d Root Cause Investigation Report\n\n### Alert Summary\n\ud83d\udea8 **PRODUCTION ALERT \u2014 ML Model Accuracy Degradation**\n\n**Model:** Fraud_Detection_ML_Model\n**Metric:** Fraud Detection Accuracy\n**Current:** 42.3% (was 97.8%)\n**False Positive Rate:** 78.5% (was 2.1%\n\n### Affected ML Model\n- **Name:** Fraud_Detection_ML_Model\n- **URN:** urn:li:mlModel:(urn:li:dataPlatform:mlflow,Fraud_Detection_ML_Model,PROD)\n- **Platform:** mlflow\n\n### Lineage Trace (Upstream Dependencies)\n  \u251c\u2500 feature_engineering_table (postgres)\n  \u2514\u2500 paysim_raw_transactions (postgres)\n\n\n### Schema Drift Detected \u26a0\ufe0f\n**Dataset:** paysim_raw_transactions\n**Column:** `amount`\n**Previous Type:** `DOUBLE`\n**Current Type:** `STRING`\n**Change Detected At:** 2026-07-10T09:15:00Z\n\n### Root Cause Analysis\nThe column 'amount' in upstream table 'paysim_raw_transactions' was changed from type 'DOUBLE' to 'STRING' on 2026-07-10T09:15:00Z.\n\nThis column is a CRITICAL numeric feature used by Fraud_Detection_ML_Model. When the type changed to STRING, the ML model could no longer perform mathematical operations on this feature, causing:\n  \u2022 Accuracy drop: 97.8% \u2192 42.3%\n  \u2022 False Positive Rate spike: 2.1% \u2192 78.5%\n  \u2022 Legitimate transactions blocked at 37x normal rate\n\nThe schema change was likely made by an upstream engineer without awareness of downstream ML dependencies.\n\n### Remediation Actions Executed\n1. \u2705 Added tag `[DATA-INCIDENT: DO NOT USE]` to `Fraud_Detection_ML_Model` in DataHub\n2. \u2705 Generated SQL fix script: `/Users/bambangaji/Documents/Hackathon/examples/generated_fix_amount.sql`\n3. \u2705 Incident report written back to DataHub metadata\n\n### Recommended Next Steps\n1. Review and apply the generated SQL fix script\n2. Re-run DataHub ingestion to update metadata\n3. Retrain/revalidate the Fraud Detection model\n4. Remove the DATA-INCIDENT tag once verified\n5. Add schema change alerts to prevent recurrence\n",
-  "investigation_log": [
+  "investigation": {
+    "drift_report": {
+      "total_drifts": 1,
+      "critical_drifts": 1,
+      "any_drift": true
+    },
+    "audit_log": [
+      {
+        "id": 1,
+        "table_name": "paysim_raw_transactions",
+        "column_name": "amount",
+        "old_type": "double precision",
+        "new_type": "character varying",
+        "changed_by": "bambang_engineer",
+        "change_reason": "ETL pipeline refactor \u2014 column type changed unintentionally during migration",
+        "changed_at": "2026-08-08T13:38:45.003381+00:00",
+        "reverted_at": null,
+        "is_reverted": false,
+        "severity": "CRITICAL",
+        "notes": null
+      }
+    ],
+    "lineage_trace": "\u25c6 Fraud_Detection_ML_Model [mlflow]\n  \u251c\u2500 feature_engineering_table (postgres)\n  \u2502    \u2514\u2500 paysim_raw_transactions (postgres)",
+    "ownership": {
+      "feature_engineering_table": [],
+      "paysim_raw_transactions": []
+    },
+    "root_cause": "The likely cause of the data drift in the `paysim_raw_transactions.amount` column from double precision to character varying is the changes made by the engineer `bambang_engineer`, who stated the reason for the modification as an unintended result of an ETL pipeline refactor. This oversight may lead to critical failures in downstream systems, specifically impacting the `feature_engineering_table` and subsequently the `Fraud_Detection_ML_Model`, as they rely on consistent data types for processing and analysis.",
+    "impact_metrics": {
+      "mode": "simulation",
+      "table": "paysim_raw_transactions",
+      "total_rows": 50000,
+      "simulated_row_count": 50000,
+      "active_drifts": 1,
+      "columns": {
+        "amount": {
+          "type_ok": false,
+          "null_count": 0,
+          "null_pct": 0.0
+        },
+        "isfraud": {
+          "type_ok": true,
+          "null_count": 0,
+          "null_pct": 0.0
+        }
+      },
+      "computed_at": "2026-08-08T13:38:52.416171+00:00"
+    },
+    "table_stats": {
+      "mode": "simulation",
+      "total_rows": 50000,
+      "fraud_rows": 82,
+      "fraud_rate_pct": 0.16,
+      "avg_amount": 178234.52,
+      "transaction_types": {
+        "PAYMENT": 18207,
+        "TRANSFER": 5431,
+        "CASH_OUT": 21626,
+        "DEBIT": 2151,
+        "CASH_IN": 2585
+      },
+      "note": "Simulated values based on PaySim dataset distribution"
+    },
+    "impacted_models": [
+      {
+        "urn": "urn:li:dataset:(urn:li:dataPlatform:mlflow,Fraud_Detection_ML_Model,PROD)",
+        "name": "Fraud_Detection_ML_Model",
+        "platform": "mlflow",
+        "tags": [
+          "production",
+          "fintech",
+          "fraud-detection",
+          "xgboost",
+          "DATA-INCIDENT: DO NOT USE"
+        ],
+        "owners": []
+      }
+    ],
+    "dollar_impact_hour_estimate": 7500.0,
+    "fix_scripts": {
+      "paysim_raw_transactions.amount": {
+        "strategy": "cast_back",
+        "sql_fix_path": "/Users/bambangaji/Documents/Hackathon/examples/generated_fix_amount.sql",
+        "dbt_fix_path": "/Users/bambangaji/Documents/Hackathon/examples/generated_dbt_fix_amount.sql"
+      }
+    },
+    "fix_iterations": 1,
+    "review_verdict": "APPROVE",
+    "review_notes": "APPROVE  \nAll checks have passed with no unsafe patterns or incomplete processes identified in the SQL script. It is safe to proceed with this approval.",
+    "datahub_writeback": {
+      "tag": "DATA-INCIDENT: DO NOT USE",
+      "description": "Schema drift in paysim_raw_transactions. Columns: amount. Critical drifts: 1. Approved by multi-agent reviewer at 2026-08-08T13:38:55.296117+00:00.",
+      "models_tagged": {
+        "urn:li:dataset:(urn:li:dataPlatform:mlflow,Fraud_Detection_ML_Model,PROD)": true
+      },
+      "incident_urns": {
+        "urn:li:dataset:(urn:li:dataPlatform:mlflow,Fraud_Detection_ML_Model,PROD)": null
+      },
+      "n_models": 1
+    }
+  },
+  "agents": {
+    "detector": {
+      "agent": "Detector",
+      "status": "success",
+      "summary": "The schema scan identified a critical drift in the paysim_raw_transactions table, where the column amount was changed from double precision to character varying. This change was made unintentionally by an engineer during an ETL pipeline refactor.",
+      "findings": {
+        "n_tables_scanned": 1,
+        "n_drifts": 1,
+        "n_critical": 1,
+        "audit_entries": 1
+      }
+    },
+    "root_cause_analyst": {
+      "agent": "RootCauseAnalyst",
+      "status": "success",
+      "summary": "The likely cause of the data drift in the `paysim_raw_transactions.amount` column from double precision to character varying is the changes made by the engineer `bambang_engineer`, who stated the reason for the modification as an unintended result of an ETL pipeline refactor. This oversight may lead to critical failures in downstream systems, specifically impacting the `feature_engineering_table` and subsequently the `Fraud_Detection_ML_Model`, as they rely on consistent data types for processing and analysis.",
+      "findings": {
+        "affected_tables": [
+          "paysim_raw_transactions"
+        ],
+        "lineage_edges": 3,
+        "owners_found": 0
+      }
+    },
+    "impact_assessor": {
+      "agent": "ImpactAssessor",
+      "status": "success",
+      "summary": "We have identified a total of 50,000 rows impacted, with 82 rows classified as fraud, reflecting a fraud rate of 0.16%. The affected ML model is the 'Fraud_Detection_ML_Model' which is experiencing critical drifts, specifically one identified instance of drift. The estimated hourly dollar exposure due to these issues is roughly $7,500.",
+      "findings": {
+        "total_rows": 50000,
+        "impacted_models": 1,
+        "dollar_hour_estimate": 7500.0,
+        "corrupted_columns": 1
+      }
+    },
+    "fix_author": {
+      "agent": "FixAuthor",
+      "status": "success",
+      "summary": "For the drift in `paysim_raw_transactions.amount`, the strategy used is `cast_back`. This strategy is appropriate because it addresses a change in the data type of the column without losing any existing data. By using the `ALTER COLUMN ... TYPE ... USING CAST` command, the original type can be restored in place, ensuring data integrity. The generated script is found in `/Users/bambangaji/Documents/Hackathon/examples/generated_fix_amount.sql`.",
+      "findings": {
+        "n_scripts": 1,
+        "n_unhandled": 0,
+        "iteration": 1
+      }
+    },
+    "reviewer": {
+      "agent": "Reviewer",
+      "status": "success",
+      "summary": "APPROVE  \nAll checks have passed with no unsafe patterns or incomplete processes identified in the SQL script. It is safe to proceed with this approval.",
+      "findings": {
+        "verdict": "APPROVE",
+        "n_issues": 0
+      }
+    }
+  },
+  "event_timeline": [
     {
-      "timestamp": "2026-07-11T15:07:29.481707",
-      "step": "STEP 1: Identify Affected Model",
-      "detail": "Parsing alert to find the ML model mentioned..."
+      "kind": "orchestrator",
+      "agent": "Orchestrator",
+      "timestamp": "2026-08-08T13:38:45.845749+00:00",
+      "text": "LangGraph investigation started. LLM: openai / gpt-4o-mini."
     },
     {
-      "timestamp": "2026-07-11T15:07:29.481859",
-      "step": "STEP 1: Complete",
-      "detail": "Found model: Fraud_Detection_ML_Model (URN: urn:li:mlModel:(urn:li:dataPlatform:mlflow,Fraud_Detection_ML_Model,PROD))"
+      "kind": "agent_start",
+      "agent": "Detector",
+      "timestamp": "2026-08-08T13:38:45.847297+00:00",
+      "text": "Scanning monitored tables for drift."
     },
     {
-      "timestamp": "2026-07-11T15:07:29.481872",
-      "step": "STEP 2: Trace Upstream Lineage",
-      "detail": "Traversing lineage graph upstream from Fraud_Detection_ML_Model..."
+      "kind": "tool_call",
+      "agent": "Detector",
+      "timestamp": "2026-08-08T13:38:45.847304+00:00",
+      "text": "\u2192 scan_schema()"
     },
     {
-      "timestamp": "2026-07-11T15:07:29.481934",
-      "step": "STEP 2: Complete",
-      "detail": "Found 2 upstream entities:\n  \u251c\u2500 feature_engineering_table (postgres)\n  \u2514\u2500 paysim_raw_transactions (postgres)\n"
+      "kind": "tool_result",
+      "agent": "Detector",
+      "timestamp": "2026-08-08T13:38:45.847398+00:00",
+      "text": "Schema scan complete"
     },
     {
-      "timestamp": "2026-07-11T15:07:29.481943",
-      "step": "STEP 3: Check Schema History",
-      "detail": "Examining schema history for each upstream dataset..."
+      "kind": "tool_call",
+      "agent": "Detector",
+      "timestamp": "2026-08-08T13:38:45.847403+00:00",
+      "text": "\u2192 read_audit_log()"
     },
     {
-      "timestamp": "2026-07-11T15:07:29.482007",
-      "step": "\u26a0\ufe0f  SCHEMA DRIFT DETECTED",
-      "detail": "Column 'amount' in 'paysim_raw_transactions' changed from DOUBLE to STRING at 2026-07-10T09:15:00Z"
+      "kind": "tool_result",
+      "agent": "Detector",
+      "timestamp": "2026-08-08T13:38:45.847409+00:00",
+      "text": "Audit log read"
     },
     {
-      "timestamp": "2026-07-11T15:07:29.482018",
-      "step": "STEP 4: Root Cause Analysis",
-      "detail": "Correlating schema drift with model degradation..."
+      "kind": "agent_message",
+      "agent": "Detector",
+      "timestamp": "2026-08-08T13:38:51.022795+00:00",
+      "text": "The schema scan identified a critical drift in the paysim_raw_transactions table, where the column amount was changed from double precision to character varying. This change was made unintentionally by an engineer during an ETL pipeline refactor."
     },
     {
-      "timestamp": "2026-07-11T15:07:29.482028",
-      "step": "STEP 4: Complete",
-      "detail": "Root cause identified:\nThe column 'amount' in upstream table 'paysim_raw_transactions' was changed from type 'DOUBLE' to 'STRING' on 2026-07-10T09:15:00Z.\n\nThis column is a CRITICAL numeric feature used by Fraud_Detection_ML_Model. When the type changed to STRING, the ML model could no longer perform mathematical operations on this feature, causing:\n  \u2022 Accuracy drop: 97.8% \u2192 42.3%\n  \u2022 False Positive Rate spike: 2.1% \u2192 78.5%\n  \u2022 Legitimate transactions blocked at 37x normal rate\n\nThe schema change was likely made by an upstream engineer without awareness of downstream ML dependencies."
+      "kind": "agent_complete",
+      "agent": "Detector",
+      "timestamp": "2026-08-08T13:38:51.022828+00:00",
+      "text": "Handoff \u2192 RootCauseAnalyst"
     },
     {
-      "timestamp": "2026-07-11T15:07:29.482040",
-      "step": "STEP 5: Execute Remediation",
-      "detail": "Writing incident tag to DataHub and generating fix scripts..."
+      "kind": "agent_start",
+      "agent": "RootCauseAnalyst",
+      "timestamp": "2026-08-08T13:38:51.024625+00:00",
+      "text": "Investigating root cause for 1 drift(s) across 1 table(s)."
     },
     {
-      "timestamp": "2026-07-11T15:07:29.482420",
-      "step": "STEP 5: Complete",
-      "detail": "Tag 'DATA-INCIDENT: DO NOT USE' added to Fraud_Detection_ML_Model. Fix scripts generated at /Users/bambangaji/Documents/Hackathon/examples/"
+      "kind": "tool_call",
+      "agent": "RootCauseAnalyst",
+      "timestamp": "2026-08-08T13:38:51.024649+00:00",
+      "text": "\u2192 get_lineage()"
+    },
+    {
+      "kind": "tool_result",
+      "agent": "RootCauseAnalyst",
+      "timestamp": "2026-08-08T13:38:51.024713+00:00",
+      "text": "Lineage traced"
+    },
+    {
+      "kind": "tool_call",
+      "agent": "RootCauseAnalyst",
+      "timestamp": "2026-08-08T13:38:51.024724+00:00",
+      "text": "\u2192 get_ownership()"
+    },
+    {
+      "kind": "tool_result",
+      "agent": "RootCauseAnalyst",
+      "timestamp": "2026-08-08T13:38:51.024748+00:00",
+      "text": "Owners fetched for 1 table(s)"
+    },
+    {
+      "kind": "agent_message",
+      "agent": "RootCauseAnalyst",
+      "timestamp": "2026-08-08T13:38:52.413117+00:00",
+      "text": "The likely cause of the data drift in the `paysim_raw_transactions.amount` column from double precision to character varying is the changes made by the engineer `bambang_engineer`, who stated the reason for the modification as an unintended result of an ETL pipeline refactor. This oversight may lead to critical failures in downstream systems, specifically impacting the `feature_engineering_table` and subsequently the `Fraud_Detection_ML_Model`, as they rely on consistent data types for processing and analysis."
+    },
+    {
+      "kind": "agent_complete",
+      "agent": "RootCauseAnalyst",
+      "timestamp": "2026-08-08T13:38:52.413157+00:00",
+      "text": "Handoff \u2192 ImpactAssessor + FixAuthor (parallel)"
+    },
+    {
+      "kind": "agent_start",
+      "agent": "ImpactAssessor",
+      "timestamp": "2026-08-08T13:38:52.415053+00:00",
+      "text": "Computing business impact for 1 drift(s)."
+    },
+    {
+      "kind": "tool_call",
+      "agent": "ImpactAssessor",
+      "timestamp": "2026-08-08T13:38:52.415076+00:00",
+      "text": "\u2192 compute_impact()"
+    },
+    {
+      "kind": "tool_result",
+      "agent": "ImpactAssessor",
+      "timestamp": "2026-08-08T13:38:52.416202+00:00",
+      "text": "Impact metrics computed"
+    },
+    {
+      "kind": "tool_call",
+      "agent": "ImpactAssessor",
+      "timestamp": "2026-08-08T13:38:52.416225+00:00",
+      "text": "\u2192 get_table_stats()"
+    },
+    {
+      "kind": "tool_result",
+      "agent": "ImpactAssessor",
+      "timestamp": "2026-08-08T13:38:52.416256+00:00",
+      "text": "50,000 rows analysed"
+    },
+    {
+      "kind": "tool_call",
+      "agent": "ImpactAssessor",
+      "timestamp": "2026-08-08T13:38:52.416271+00:00",
+      "text": "\u2192 find_impacted_models(['paysim_raw_transactions'])"
+    },
+    {
+      "kind": "tool_result",
+      "agent": "ImpactAssessor",
+      "timestamp": "2026-08-08T13:38:52.416299+00:00",
+      "text": "Downstream models resolved"
+    },
+    {
+      "kind": "tool_call",
+      "agent": "ImpactAssessor",
+      "timestamp": "2026-08-08T13:38:52.416318+00:00",
+      "text": "\u2192 estimate_dollar_impact(1, 50000, 1, 0.16)"
+    },
+    {
+      "kind": "tool_result",
+      "agent": "ImpactAssessor",
+      "timestamp": "2026-08-08T13:38:52.416344+00:00",
+      "text": "Exposure heuristic applied"
+    },
+    {
+      "kind": "agent_message",
+      "agent": "ImpactAssessor",
+      "timestamp": "2026-08-08T13:38:53.479750+00:00",
+      "text": "We have identified a total of 50,000 rows impacted, with 82 rows classified as fraud, reflecting a fraud rate of 0.16%. The affected ML model is the 'Fraud_Detection_ML_Model' which is experiencing critical drifts, specifically one identified instance of drift. The estimated hourly dollar exposure due to these issues is roughly $7,500."
+    },
+    {
+      "kind": "agent_complete",
+      "agent": "ImpactAssessor",
+      "timestamp": "2026-08-08T13:38:53.479772+00:00",
+      "text": "Impact quantified. ~$7,500/hr exposure."
+    },
+    {
+      "kind": "agent_start",
+      "agent": "FixAuthor",
+      "timestamp": "2026-08-08T13:38:52.415455+00:00",
+      "text": "First attempt: authoring fixes for 1 drift(s)."
+    },
+    {
+      "kind": "tool_call",
+      "agent": "FixAuthor",
+      "timestamp": "2026-08-08T13:38:52.415501+00:00",
+      "text": "\u2192 generate_fix_scripts([{'table': 'paysim_raw_transactions', 'column': 'amount', 'baseline_type': 'double precision', 'actual_type': 'character varying', 'detected_at': '2026-08-08T13:38:45.847388+00:00', 'drift_type': 'TYPE_CHANGE', 'severity': 'CRITICAL', 'changed_by': 'bambang_engineer', 'change_reason': 'ETL pipeline refactor \u2014 column type changed unintentionally during migration', 'log_timestamp': '2026-08-08T13:38:45.003381+00:00'}])"
+    },
+    {
+      "kind": "tool_result",
+      "agent": "FixAuthor",
+      "timestamp": "2026-08-08T13:38:52.420800+00:00",
+      "text": "Fix generation dispatched"
+    },
+    {
+      "kind": "agent_message",
+      "agent": "FixAuthor",
+      "timestamp": "2026-08-08T13:38:54.416645+00:00",
+      "text": "For the drift in `paysim_raw_transactions.amount`, the strategy used is `cast_back`. This strategy is appropriate because it addresses a change in the data type of the column without losing any existing data. By using the `ALTER COLUMN ... TYPE ... USING CAST` command, the original type can be restored in place, ensuring data integrity. The generated script is found in `/Users/bambangaji/Documents/Hackathon/examples/generated_fix_amount.sql`."
+    },
+    {
+      "kind": "agent_complete",
+      "agent": "FixAuthor",
+      "timestamp": "2026-08-08T13:38:54.416679+00:00",
+      "text": "Handoff \u2192 Reviewer"
+    },
+    {
+      "kind": "agent_start",
+      "agent": "Reviewer",
+      "timestamp": "2026-08-08T13:38:54.418028+00:00",
+      "text": "Reviewing 1 fix script(s)."
+    },
+    {
+      "kind": "tool_call",
+      "agent": "Reviewer",
+      "timestamp": "2026-08-08T13:38:54.418090+00:00",
+      "text": "\u2192 validate_fix_safety({'paysim_raw_transactions.amount': {'sql_fix_path': '/Users/bambangaji/Documents/Hackathon/examples/generated_fix_amount.sql', 'dbt_fix_path': '/Users/bambangaji/Documents/Hackathon/examples/generated_dbt_fix_amount.sql', 'sql_preview': '-- =============================================================================\\n-- AUTO-GENERATED FIX SCRIPT by AI Data Reliability Agent\\n-- Generated at: 2026-08-08 20:38:52\\n-- =============================================================================\\n--\\n-- PROBLEM DETECTED:\\n--   Table: public.paysim_raw_transactions\\n--   Column: amount\\n--   Current (Wrong) Type: character varying\\n--   Expected (Correct) Type: double precision -> DOUBLE PRECISION\\n--\\n-- ROOT CAUSE:\\n--   An upstream engineer ...', 'strategy': 'cast_back'}})"
+    },
+    {
+      "kind": "tool_result",
+      "agent": "Reviewer",
+      "timestamp": "2026-08-08T13:38:54.419663+00:00",
+      "text": "Static safety analysis complete"
+    },
+    {
+      "kind": "agent_message",
+      "agent": "Reviewer",
+      "timestamp": "2026-08-08T13:38:55.295263+00:00",
+      "text": "APPROVE  \nAll checks have passed with no unsafe patterns or incomplete processes identified in the SQL script. It is safe to proceed with this approval."
+    },
+    {
+      "kind": "review_verdict",
+      "agent": "Reviewer",
+      "timestamp": "2026-08-08T13:38:55.295301+00:00",
+      "text": "APPROVE"
+    },
+    {
+      "kind": "agent_complete",
+      "agent": "Reviewer",
+      "timestamp": "2026-08-08T13:38:55.295305+00:00",
+      "text": "Verdict issued: APPROVE"
+    },
+    {
+      "kind": "tool_call",
+      "agent": "Orchestrator",
+      "timestamp": "2026-08-08T13:38:55.296140+00:00",
+      "text": "Tagged Fraud_Detection_ML_Model with `DATA-INCIDENT: DO NOT USE`."
+    },
+    {
+      "kind": "tool_call",
+      "agent": "Orchestrator",
+      "timestamp": "2026-08-08T13:38:55.296149+00:00",
+      "text": "Recorded incident context for Fraud_Detection_ML_Model (tag-based fallback)."
+    },
+    {
+      "kind": "tool_call",
+      "agent": "Orchestrator",
+      "timestamp": "2026-08-08T13:38:55.296155+00:00",
+      "text": "Tagged raw source table `paysim_raw_transactions` with SCHEMA-DRIFT-DETECTED."
+    },
+    {
+      "kind": "done",
+      "agent": "Orchestrator",
+      "timestamp": "2026-08-08T13:38:55.296160+00:00",
+      "text": "Investigation complete."
     }
   ]
 }

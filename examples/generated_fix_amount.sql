@@ -1,6 +1,6 @@
 -- =============================================================================
 -- AUTO-GENERATED FIX SCRIPT by AI Data Reliability Agent
--- Generated at: 2026-07-17 15:03:01
+-- Generated at: 2026-08-08 20:38:52
 -- =============================================================================
 --
 -- PROBLEM DETECTED:
@@ -53,7 +53,7 @@ ALTER TABLE public.paysim_raw_transactions
 
 -- Step 3: Add a comment documenting the fix for future reference
 COMMENT ON COLUMN public.paysim_raw_transactions.amount IS 
-    'FIXED by AI Data Reliability Agent on 2026-07-17 15:03:01. '
+    'FIXED by AI Data Reliability Agent on 2026-08-08 20:38:52. '
     'Type restored from character varying to DOUBLE PRECISION. '
     'Original incident: schema drift caused Fraud ML Model degradation.';
 
