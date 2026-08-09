@@ -213,6 +213,7 @@ class PostgresSchemaInspector:
             )
             base_tables = {r[0] for r in cur.fetchall()}
             cur.close()
+            self._conn.commit()  # end the transaction now — don't hold a lock while idle
             filtered = [t for t in candidates if t in base_tables]
             skipped = [t for t in candidates if t not in base_tables]
             if skipped:
@@ -296,6 +297,7 @@ class PostgresSchemaInspector:
             )
             rows = cur.fetchall()
             cur.close()
+            self._conn.commit()  # end the transaction now — don't hold a lock while idle
             return [
                 {"column": r[0].lower(), "type": r[1].lower(), "nullable": r[2].upper() == "YES"}
                 for r in rows
@@ -358,6 +360,7 @@ class PostgresSchemaInspector:
             )
             rows = cur.fetchall()
             cur.close()
+            self._conn.commit()  # end the transaction now — don't hold a lock while idle
             return [
                 {
                     "column": r[0], "type": r[1],
@@ -415,6 +418,7 @@ class PostgresSchemaInspector:
                 )
             rows = cur.fetchall()
             cur.close()
+            self._conn.commit()  # end the transaction now — don't hold a lock while idle
             cols = ["id", "table_name", "column_name", "old_type", "new_type",
                     "changed_by", "change_reason", "changed_at",
                     "reverted_at", "is_reverted", "severity", "notes"]
@@ -719,6 +723,7 @@ class PostgresSchemaInspector:
 
             if metrics["total_rows"] == 0:
                 cur.close()
+                self._conn.commit()  # end the transaction now — don't hold a lock while idle
                 metrics["warning"] = "Table is empty — seed data first."
                 return metrics
 
@@ -786,6 +791,7 @@ class PostgresSchemaInspector:
                 metrics["columns"][col] = col_metrics
 
             cur.close()
+            self._conn.commit()  # end the transaction now — don't hold a lock while idle
         except Exception as exc:
             self._safe_rollback()
             logger.error(f"Error computing impact metrics: {exc}")
@@ -849,6 +855,7 @@ class PostgresSchemaInspector:
             total = cur.fetchone()[0]
             if total == 0:
                 cur.close()
+                self._conn.commit()  # end the transaction now — don't hold a lock while idle
                 return {"mode": "live", "total_rows": 0, "note": "Table is empty — run seed first"}
 
             # Fraud count (only works if isFraud is integer)
@@ -883,6 +890,7 @@ class PostgresSchemaInspector:
                 cur = self._conn.cursor()
 
             cur.close()
+            self._conn.commit()  # end the transaction now — don't hold a lock while idle
             return {
                 "mode": "live",
                 "total_rows": total,
